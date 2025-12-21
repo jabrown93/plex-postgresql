@@ -14,6 +14,80 @@
  *   export PLEX_PG_HOST=localhost
  *   ... other env vars
  *   open /Applications/Plex\ Media\ Server.app
+ *
+ * ==============================================================================
+ * TABLE OF CONTENTS
+ * ==============================================================================
+ *
+ * 1. HEADERS & CONFIGURATION (lines ~19-100)
+ *    - Includes, defines, global state variables
+ *    - Environment variable configuration
+ *
+ * 2. POSTGRESQL CONNECTION MANAGEMENT (lines ~101-250)
+ *    - get_pg_connection: Get/create PostgreSQL connection
+ *    - ensure_pg_connection: Connection validation
+ *    - Connection pooling (single connection, reused)
+ *
+ * 3. SKIP PATTERNS & FALLBACK LOGIC (lines ~251-440)
+ *    - SQLITE_SKIP_PATTERNS: Queries that stay on SQLite
+ *    - should_skip_sql: Check if query should skip PostgreSQL
+ *    - log_sql_fallback: Log queries that fall back to SQLite
+ *    - is_known_translation_limitation: Known translation issues
+ *
+ * 4. STATEMENT CACHING (TLS-BASED) (lines ~441-650)
+ *    - Thread-Local Storage for per-thread result caching
+ *    - cached_pg_stmt_t structure
+ *    - get_cached_pg_stmt, set_cached_pg_stmt
+ *    - Hybrid approach: SQLite step() + PostgreSQL data
+ *
+ * 5. PARAMETER BINDING (lines ~651-819)
+ *    - sqlite3_bind_int, bind_int64, bind_double
+ *    - sqlite3_bind_text, bind_blob, bind_null
+ *    - Translates SQLite params → PostgreSQL format
+ *
+ * 6. COLUMN ACCESS FUNCTIONS (lines ~820-1000)
+ *    - sqlite3_column_int, column_int64, column_double
+ *    - sqlite3_column_text, column_blob, column_bytes
+ *    - sqlite3_data_count, column_count, column_type
+ *    - Hybrid mode: Use PostgreSQL data from TLS cache
+ *
+ * 7. PREPARED STATEMENT CREATION (lines ~1001-1240)
+ *    - sqlite3_prepare_v2: Main statement preparation
+ *    - sqlite3_prepare_v3: Enhanced version
+ *    - SQL translation + PostgreSQL prepare
+ *    - Fallback to SQLite on translation failure
+ *
+ * 8. STATEMENT EXECUTION (lines ~1242-1400)
+ *    - sqlite3_step: **MAIN EXECUTION FUNCTION**
+ *    - Hybrid approach for cached READ queries
+ *    - PostgreSQL execution + result caching
+ *    - Error handling + fallback logic
+ *
+ * 9. STATEMENT MANAGEMENT (lines ~1401-1600)
+ *    - sqlite3_reset: Reset statement for reuse
+ *    - sqlite3_finalize: Cleanup statement
+ *    - sqlite3_clear_bindings: Clear parameter bindings
+ *
+ * 10. TRANSACTION MANAGEMENT (lines ~1601-1750)
+ *     - Transaction handling (minimal - mostly passthrough)
+ *     - BEGIN, COMMIT, ROLLBACK
+ *
+ * 11. UTILITY FUNCTIONS (lines ~1751-1943)
+ *     - Logging functions
+ *     - Error handling
+ *     - Miscellaneous helpers
+ *     - DYLD_INTERPOSE table setup
+ *
+ * ==============================================================================
+ * KEY FUNCTIONS
+ * ==============================================================================
+ *
+ * sqlite3_step (line ~1242)     - Main query execution, uses hybrid caching
+ * sqlite3_prepare_v2 (~1050)    - Statement preparation with SQL translation
+ * get_cached_pg_stmt (~470)     - Retrieve cached PostgreSQL result
+ * log_sql_fallback (~400)       - Log queries that fall back to SQLite
+ *
+ * ==============================================================================
  */
 
 #include <stdio.h>
@@ -230,28 +304,6 @@ static void register_cached_pg_stmt(sqlite3_stmt *sqlite_stmt, pg_stmt_t *pg_stm
                 (MAX_CACHED_STMTS_PER_THREAD - 1) * sizeof(cached_stmt_entry_t));
         tcs->entries[MAX_CACHED_STMTS_PER_THREAD - 1].sqlite_stmt = sqlite_stmt;
         tcs->entries[MAX_CACHED_STMTS_PER_THREAD - 1].pg_stmt = pg_stmt;
-    }
-}
-
-// Clear cached statement result for this thread
-static void clear_cached_pg_stmt(sqlite3_stmt *sqlite_stmt) {
-    thread_cached_stmts_t *tcs = get_thread_cached_stmts();
-    if (!tcs) return;
-
-    for (int i = 0; i < tcs->count; i++) {
-        if (tcs->entries[i].sqlite_stmt == sqlite_stmt) {
-            pg_stmt_t *pg_stmt = tcs->entries[i].pg_stmt;
-            if (pg_stmt) {
-                // Just clear the result, keep the pg_stmt for reuse
-                if (pg_stmt->result) {
-                    PQclear(pg_stmt->result);
-                    pg_stmt->result = NULL;
-                }
-                pg_stmt->current_row = 0;
-                pg_stmt->num_rows = 0;
-            }
-            return;
-        }
     }
 }
 

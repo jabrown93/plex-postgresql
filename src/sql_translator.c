@@ -2,6 +2,65 @@
  * SQL Translator - SQLite to PostgreSQL
  *
  * Comprehensive translation of SQLite SQL to PostgreSQL.
+ *
+ * ==============================================================================
+ * TABLE OF CONTENTS
+ * ==============================================================================
+ *
+ * 1. HELPER FUNCTIONS (lines ~20-125)
+ *    - str_replace, str_replace_nocase
+ *    - skip_ws, is_ident_char, extract_arg
+ *
+ * 2. PLACEHOLDER TRANSLATION (lines ~129-232)
+ *    - sql_translate_placeholders: ? and :name → $1, $2, ...
+ *
+ * 3. FUNCTION TRANSLATIONS (lines ~239-540)
+ *    - translate_iif:         iif() → CASE WHEN
+ *    - translate_typeof:      typeof() → pg_typeof()::text
+ *    - translate_strftime:    strftime() → EXTRACT/TO_CHAR
+ *    - translate_unixepoch:   unixepoch() → EXTRACT(EPOCH FROM ...)
+ *    - translate_datetime:    datetime('now') → NOW()
+ *    - translate_last_insert_rowid: (helper)
+ *    - translate_json_each:   json_each() → json_array_elements()
+ *    - fix_group_by_strict:   Add missing GROUP BY columns
+ *
+ * 4. QUERY STRUCTURE TRANSLATIONS (lines ~542-960)
+ *    - add_subquery_alias:    Add AS alias to subqueries
+ *    - translate_case_booleans: 0/1 → TRUE/FALSE
+ *    - translate_max_to_greatest: max(a,b) → GREATEST(a,b)
+ *    - translate_min_to_least:    min(a,b) → LEAST(a,b)
+ *    - translate_fts:         FTS4 → ILIKE queries
+ *    - fix_forward_reference_joins
+ *    - translate_distinct_orderby
+ *
+ * 5. MAIN FUNCTION ORCHESTRATOR (lines ~962-1114)
+ *    - sql_translate_functions: Coordinates all function translations
+ *
+ * 6. TYPE TRANSLATIONS (lines ~1120-1181)
+ *    - sql_translate_types: AUTOINCREMENT, BLOB→BYTEA, dt_integer(8)
+ *
+ * 7. QUOTE & IDENTIFIER TRANSLATIONS (lines ~1189-1331)
+ *    - translate_backticks:    `column` → "column"
+ *    - translate_column_quotes: table.'column' → table."column"
+ *    - translate_alias_quotes:  AS 'alias' → AS "alias"
+ *
+ * 8. DDL TRANSLATIONS (lines ~1337-1491)
+ *    - add_if_not_exists:   CREATE TABLE → CREATE TABLE IF NOT EXISTS
+ *    - translate_ddl_quotes: Fix single-quoted identifiers in DDL
+ *
+ * 9. KEYWORD TRANSLATIONS (lines ~1497-1662)
+ *    - sql_translate_keywords: BEGIN IMMEDIATE, REPLACE INTO, sqlite_master
+ *    - INDEXED BY hints removal
+ *
+ * 10. OPERATOR SPACING (lines ~1670-1730)
+ *     - fix_operator_spacing: !=-1 → != -1
+ *
+ * 11. MAIN ORCHESTRATOR (lines ~1736-1838)
+ *     - sql_translate:      Main entry point, coordinates all steps
+ *     - sql_translator_init, sql_translator_cleanup
+ *     - sql_translation_free
+ *
+ * ==============================================================================
  */
 
 #include "sql_translator.h"
