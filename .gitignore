@@ -1,0 +1,37 @@
+# Build artifacts
+*.o
+*.dylib
+*.a
+*.so
+
+# macOS
+.DS_Store
+._*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+
+# Local config
+.plex_db_mode
+.env
+
+# Plex binaries (not to be distributed)
+Plex Media Scanner
+plex_server_wrapper
+scanner_wrapper
+
+# Test databases
+*.db
+*.db-wal
+*.db-shm
+
+# Backup files
+*.backup
+*.bak
