@@ -511,8 +511,8 @@ static char* add_subquery_alias(const char *sql) {
     return result;
 }
 
-// Translate CASE THEN 0 ELSE 1 -> CASE THEN FALSE ELSE TRUE (and vice versa)
-// SQLite uses integers in boolean context, PostgreSQL requires actual booleans
+// Translate CASE with mixed boolean/integer types
+// SQLite allows mixing 0/1 with booleans, PostgreSQL doesn't
 static char* translate_case_booleans(const char *sql) {
     if (!sql) return NULL;
 
@@ -521,14 +521,29 @@ static char* translate_case_booleans(const char *sql) {
 
     char *temp;
 
-    // THEN 0 ELSE 1 END -> THEN FALSE ELSE TRUE END
-    temp = str_replace_nocase(current, " then 0 else 1 end", " THEN FALSE ELSE TRUE END");
+    // "else 1 end)" in boolean context -> "else true end)"
+    // This fixes cases like: case when X then Y > 0 else 1 end
+    temp = str_replace_nocase(current, " else 1 end)", " else true end)");
     free(current);
+    if (!temp) return NULL;
     current = temp;
 
-    // THEN 1 ELSE 0 END -> THEN TRUE ELSE FALSE END
-    temp = str_replace_nocase(current, " then 1 else 0 end", " THEN TRUE ELSE FALSE END");
+    // "else 0 end)" in boolean context -> "else false end)"
+    temp = str_replace_nocase(current, " else 0 end)", " else false end)");
     free(current);
+    if (!temp) return NULL;
+    current = temp;
+
+    // Handle integer CASE used as boolean: "and (case when ... then 0 else 1 end)"
+    // Add <> 0 to make it a boolean expression
+    temp = str_replace_nocase(current, "then 0 else true end)", "then false else true end)");
+    free(current);
+    if (!temp) return NULL;
+    current = temp;
+
+    temp = str_replace_nocase(current, "then 1 else false end)", "then true else false end)");
+    free(current);
+    if (!temp) return NULL;
     current = temp;
 
     return current;
@@ -663,6 +678,286 @@ static char* translate_min_to_least(const char *sql) {
     return result;
 }
 
+// Translate SQLite FTS4 queries to PostgreSQL ILIKE queries
+// Example: join fts4_metadata_titles_icu on ... where fts4_metadata_titles_icu.title match 'Gooi*'
+// Becomes: where metadata_items.title ILIKE '%Gooi%'
+static char* translate_fts(const char *sql) {
+    if (!sql) return NULL;
+
+    // Only process if it contains FTS4 tables
+    if (!strcasestr(sql, "fts4_")) {
+        return strdup(sql);
+    }
+
+    char *result = malloc(strlen(sql) * 2 + 100);
+    if (!result) return NULL;
+
+    // Copy the SQL and process it
+    strcpy(result, sql);
+
+    // Remove JOIN with fts4_metadata_titles_icu
+    char *join_start = strcasestr(result, "join fts4_metadata_titles_icu");
+    if (join_start) {
+        // Find the end of the JOIN clause (next WHERE, JOIN, GROUP, ORDER, etc.)
+        char *join_end = join_start;
+        while (*join_end) {
+            if (strncasecmp(join_end, " where ", 7) == 0 ||
+                strncasecmp(join_end, " join ", 6) == 0 ||
+                strncasecmp(join_end, " left ", 6) == 0 ||
+                strncasecmp(join_end, " group ", 7) == 0 ||
+                strncasecmp(join_end, " order ", 7) == 0) {
+                break;
+            }
+            join_end++;
+        }
+        // Remove the JOIN clause by shifting the rest
+        memmove(join_start, join_end, strlen(join_end) + 1);
+    }
+
+    // Remove JOIN with fts4_tag_titles_icu
+    join_start = strcasestr(result, "join fts4_tag_titles_icu");
+    if (join_start) {
+        char *join_end = join_start;
+        while (*join_end) {
+            if (strncasecmp(join_end, " where ", 7) == 0 ||
+                strncasecmp(join_end, " join ", 6) == 0 ||
+                strncasecmp(join_end, " left ", 6) == 0 ||
+                strncasecmp(join_end, " group ", 7) == 0 ||
+                strncasecmp(join_end, " order ", 7) == 0) {
+                break;
+            }
+            join_end++;
+        }
+        memmove(join_start, join_end, strlen(join_end) + 1);
+    }
+
+    // Find and translate MATCH clauses
+    // fts4_metadata_titles_icu.title match 'Gooi*' -> metadata_items.title ILIKE '%Gooi%'
+    char *match_pos;
+    while ((match_pos = strcasestr(result, "fts4_metadata_titles_icu.title match ")) != NULL) {
+        // Find the search term (between quotes)
+        char *quote_start = strchr(match_pos, '\'');
+        if (!quote_start) break;
+        quote_start++;
+        char *quote_end = strchr(quote_start, '\'');
+        if (!quote_end) break;
+
+        // Extract search term (remove * at end if present)
+        char search_term[256] = {0};
+        size_t term_len = quote_end - quote_start;
+        if (term_len > 254) term_len = 254;
+        strncpy(search_term, quote_start, term_len);
+        search_term[term_len] = '\0';
+
+        // Remove trailing * if present
+        if (term_len > 0 && search_term[term_len-1] == '*') {
+            search_term[term_len-1] = '\0';
+        }
+
+        // Create replacement: metadata_items.title ILIKE '%term%'
+        char replacement[512];
+        snprintf(replacement, sizeof(replacement), "metadata_items.title ILIKE '%%%s%%'", search_term);
+
+        // Calculate positions and lengths
+        size_t old_len = (quote_end + 1) - match_pos;
+        size_t new_len = strlen(replacement);
+
+        // Make room if needed and replace
+        if (new_len > old_len) {
+            size_t rest_len = strlen(quote_end + 1);
+            memmove(match_pos + new_len, quote_end + 1, rest_len + 1);
+        } else {
+            memmove(match_pos + new_len, quote_end + 1, strlen(quote_end + 1) + 1);
+        }
+        memcpy(match_pos, replacement, new_len);
+    }
+
+    // Also handle title_sort match
+    while ((match_pos = strcasestr(result, "fts4_metadata_titles_icu.title_sort match ")) != NULL) {
+        char *quote_start = strchr(match_pos, '\'');
+        if (!quote_start) break;
+        quote_start++;
+        char *quote_end = strchr(quote_start, '\'');
+        if (!quote_end) break;
+
+        char search_term[256] = {0};
+        size_t term_len = quote_end - quote_start;
+        if (term_len > 254) term_len = 254;
+        strncpy(search_term, quote_start, term_len);
+        if (term_len > 0 && search_term[term_len-1] == '*') {
+            search_term[term_len-1] = '\0';
+        }
+
+        char replacement[512];
+        snprintf(replacement, sizeof(replacement), "metadata_items.title_sort ILIKE '%%%s%%'", search_term);
+
+        size_t old_len = (quote_end + 1) - match_pos;
+        size_t new_len = strlen(replacement);
+
+        if (new_len > old_len) {
+            memmove(match_pos + new_len, quote_end + 1, strlen(quote_end + 1) + 1);
+        } else {
+            memmove(match_pos + new_len, quote_end + 1, strlen(quote_end + 1) + 1);
+        }
+        memcpy(match_pos, replacement, new_len);
+    }
+
+    // Handle tag titles: fts4_tag_titles_icu.title or .tag match -> tags.tag ILIKE
+    // First try .title match, then .tag match
+    while (1) {
+        match_pos = strcasestr(result, "fts4_tag_titles_icu.title match ");
+        if (!match_pos) {
+            match_pos = strcasestr(result, "fts4_tag_titles_icu.tag match ");
+        }
+        if (!match_pos) break;
+        char *quote_start = strchr(match_pos, '\'');
+        if (!quote_start) break;
+        quote_start++;
+        char *quote_end = strchr(quote_start, '\'');
+        if (!quote_end) break;
+
+        char search_term[256] = {0};
+        size_t term_len = quote_end - quote_start;
+        if (term_len > 254) term_len = 254;
+        strncpy(search_term, quote_start, term_len);
+        if (term_len > 0 && search_term[term_len-1] == '*') {
+            search_term[term_len-1] = '\0';
+        }
+
+        char replacement[512];
+        snprintf(replacement, sizeof(replacement), "tags.tag ILIKE '%%%s%%'", search_term);
+
+        size_t old_len = (quote_end + 1) - match_pos;
+        size_t new_len = strlen(replacement);
+
+        if (new_len > old_len) {
+            memmove(match_pos + new_len, quote_end + 1, strlen(quote_end + 1) + 1);
+        } else {
+            memmove(match_pos + new_len, quote_end + 1, strlen(quote_end + 1) + 1);
+        }
+        memcpy(match_pos, replacement, new_len);
+    }
+
+    return result;
+}
+
+// Fix forward references in self-joins
+// SQLite allows: FROM a JOIN b AS x ON x.id=a.col JOIN a ON a.guid=...
+// PostgreSQL requires the unaliased table to be defined first
+// Pattern: join metadata_items as X on X.id=metadata_items.Y ... join metadata_items on
+static char* fix_forward_reference_joins(const char *sql) {
+    if (!sql) return NULL;
+
+    // Check if this query has the problematic pattern
+    // Look for: join TABLE as ALIAS on ... TABLE. ... join TABLE on
+    const char *first_alias_join = strcasestr(sql, "join metadata_items as ");
+    if (!first_alias_join) return strdup(sql);
+
+    // Check if there's a forward reference to metadata_items before the unaliased join
+    const char *unaliased_join = strcasestr(sql, " join metadata_items on ");
+    if (!unaliased_join) return strdup(sql);
+
+    // Check if the unaliased join comes AFTER the aliased joins
+    if (unaliased_join < first_alias_join) return strdup(sql);
+
+    // Check if there's a forward reference (metadata_items.something) before the unaliased join
+    const char *check = first_alias_join;
+    int has_forward_ref = 0;
+    while (check < unaliased_join) {
+        if (strncasecmp(check, "metadata_items.", 15) == 0) {
+            // Make sure this isn't part of "as metadata_items"
+            if (check > sql && *(check-1) != ' ' && *(check-1) != '=') {
+                // This is a reference to metadata_items, not a definition
+            }
+            has_forward_ref = 1;
+            break;
+        }
+        check++;
+    }
+
+    if (!has_forward_ref) return strdup(sql);
+
+    // We need to move the unaliased join before the aliased joins
+    // Find the start of "join metadata_items on" and its end
+    const char *move_start = unaliased_join + 1; // skip leading space
+
+    // Find end of this JOIN clause (next JOIN, WHERE, GROUP, ORDER, or end)
+    const char *move_end = move_start;
+    int paren_depth = 0;
+    while (*move_end) {
+        if (*move_end == '(') paren_depth++;
+        else if (*move_end == ')') paren_depth--;
+        else if (paren_depth == 0) {
+            if (strncasecmp(move_end, " join ", 6) == 0 ||
+                strncasecmp(move_end, " left ", 6) == 0 ||
+                strncasecmp(move_end, " where ", 7) == 0 ||
+                strncasecmp(move_end, " group ", 7) == 0 ||
+                strncasecmp(move_end, " order ", 7) == 0 ||
+                strncasecmp(move_end, " limit ", 7) == 0) {
+                break;
+            }
+        }
+        move_end++;
+    }
+
+    // Calculate sizes
+    size_t prefix_len = first_alias_join - sql;  // Everything before first aliased join
+    size_t move_len = move_end - move_start;     // The unaliased join clause to move
+    size_t middle_len = move_start - first_alias_join - 1; // Between first alias and unaliased (minus space)
+    size_t suffix_len = strlen(move_end);        // Everything after unaliased join
+
+    // Build result: prefix + moved_join + " " + middle + suffix
+    size_t result_len = prefix_len + move_len + 1 + middle_len + suffix_len + 1;
+    char *result = malloc(result_len);
+    if (!result) return strdup(sql);
+
+    char *out = result;
+
+    // Copy prefix (up to first aliased join)
+    memcpy(out, sql, prefix_len);
+    out += prefix_len;
+
+    // Copy the unaliased join (moved here)
+    memcpy(out, move_start, move_len);
+    out += move_len;
+
+    // Add space
+    *out++ = ' ';
+
+    // Copy middle (the aliased joins, without the trailing space before unaliased)
+    memcpy(out, first_alias_join, middle_len);
+    out += middle_len;
+
+    // Copy suffix (everything after the original unaliased join position)
+    memcpy(out, move_end, suffix_len);
+    out += suffix_len;
+
+    *out = '\0';
+
+    return result;
+}
+
+// Remove DISTINCT when it would conflict with PostgreSQL ORDER BY requirements
+// PostgreSQL requires ORDER BY columns to be in SELECT list when using DISTINCT
+static char* translate_distinct_orderby(const char *sql) {
+    if (!sql) return NULL;
+
+    // Only process if it has DISTINCT
+    if (!strcasestr(sql, "distinct")) {
+        return strdup(sql);
+    }
+
+    // Remove DISTINCT when:
+    // 1. GROUP BY is present (DISTINCT is redundant)
+    // 2. ORDER BY is present (might conflict with PostgreSQL)
+    if (strcasestr(sql, "group by") || strcasestr(sql, "order by")) {
+        char *result = str_replace_nocase(sql, "select distinct", "select");
+        return result ? result : strdup(sql);
+    }
+
+    return strdup(sql);
+}
+
 // Main function translator
 char* sql_translate_functions(const char *sql) {
     if (!sql) return NULL;
@@ -672,6 +967,18 @@ char* sql_translate_functions(const char *sql) {
 
     // Apply translations in order
     char *temp;
+
+    // 0. FTS4 queries -> ILIKE queries
+    temp = translate_fts(current);
+    free(current);
+    if (!temp) return NULL;
+    current = temp;
+
+    // 0b. Remove DISTINCT when ORDER BY is present (PostgreSQL compatibility)
+    temp = translate_distinct_orderby(current);
+    free(current);
+    if (!temp) return NULL;
+    current = temp;
 
     // 1. iif() -> CASE WHEN
     temp = translate_iif(current);
@@ -748,6 +1055,61 @@ char* sql_translate_functions(const char *sql) {
     if (!temp) return NULL;
     current = temp;
 
+    // 15. Fix forward reference in self-joins (SQLite allows, PostgreSQL doesn't)
+    temp = fix_forward_reference_joins(current);
+    free(current);
+    if (!temp) return NULL;
+    current = temp;
+
+    // 16. Fix incomplete GROUP BY clauses for specific problematic queries
+    // metadata_item_views query: add missing columns to GROUP BY
+    if (strcasestr(current, "metadata_item_views.originally_available_at") &&
+        strcasestr(current, "group by grandparents.id order by")) {
+        temp = str_replace(current,
+            "group by grandparents.id order by",
+            "group by grandparents.id,metadata_item_views.originally_available_at,metadata_item_views.parent_index,metadata_item_views.\"index\",grandparents.library_section_id,grandparentsSettings.extra_data,metadata_item_views.viewed_at order by");
+        free(current);
+        if (!temp) return NULL;
+        current = temp;
+    }
+
+    // external_metadata_items query: add missing columns to GROUP BY
+    if (strcasestr(current, "external_metadata_items.id,uri,user_title") &&
+        strcasestr(current, "group by title order by")) {
+        temp = str_replace(current,
+            "group by title order by",
+            "group by title,external_metadata_items.id,uri,user_title,library_section_id,metadata_type,year,added_at,updated_at,extra_data order by");
+        free(current);
+        if (!temp) return NULL;
+        current = temp;
+    }
+
+    // metadata_item_clusterings query: remove GROUP BY entirely (causes issues)
+    if (strcasestr(current, "metadata_item_clusterings") &&
+        strcasestr(current, "group by")) {
+        // For this query, using DISTINCT instead of GROUP BY works better
+        if (strcasestr(current, "select DISTINCT")) {
+            // Already has DISTINCT, just remove GROUP BY clause
+            char *group_pos = strcasestr(current, " group by ");
+            if (group_pos) {
+                char *end = strcasestr(group_pos + 10, " order by ");
+                if (!end) end = strcasestr(group_pos + 10, " limit ");
+                if (!end) end = group_pos + strlen(group_pos);
+
+                size_t before_len = group_pos - current;
+                size_t after_len = strlen(end);
+                char *new_sql = malloc(before_len + after_len + 1);
+                if (new_sql) {
+                    memcpy(new_sql, current, before_len);
+                    memcpy(new_sql + before_len, end, after_len);
+                    new_sql[before_len + after_len] = '\0';
+                    free(current);
+                    current = new_sql;
+                }
+            }
+        }
+    }
+
     return current;
 }
 
@@ -798,6 +1160,22 @@ char* sql_translate_types(const char *sql) {
     temp = str_replace(current, "DEFAULT 'f'", "DEFAULT FALSE");
     free(current);
     current = temp;
+
+    // datetime -> TIMESTAMP (SQLite datetime type)
+    temp = str_replace_nocase(current, " datetime)", " TIMESTAMP)");
+    free(current);
+    current = temp;
+
+    temp = str_replace_nocase(current, " datetime,", " TIMESTAMP,");
+    free(current);
+    current = temp;
+
+    temp = str_replace_nocase(current, " datetime ", " TIMESTAMP ");
+    free(current);
+    current = temp;
+
+    // float -> FLOAT (should be REAL or DOUBLE PRECISION, but FLOAT works)
+    // This is already compatible
 
     return current;
 }
@@ -952,6 +1330,167 @@ static char* translate_alias_quotes(const char *sql) {
 }
 
 // ============================================================================
+// DDL IF NOT EXISTS Translation
+// ============================================================================
+
+// Add IF NOT EXISTS to CREATE TABLE/INDEX to make them idempotent
+static char* add_if_not_exists(const char *sql) {
+    if (!sql) return NULL;
+
+    const char *s = sql;
+    while (*s && isspace(*s)) s++;
+
+    // Check for CREATE TABLE (without IF NOT EXISTS already)
+    if (strncasecmp(s, "CREATE TABLE ", 13) == 0 &&
+        strncasecmp(s + 13, "IF NOT EXISTS ", 14) != 0) {
+        // Insert IF NOT EXISTS after CREATE TABLE
+        size_t prefix_len = (s - sql) + 12; // "CREATE TABLE" without space
+        size_t rest_len = strlen(s + 12);
+        char *result = malloc(prefix_len + 15 + rest_len + 1); // +15 for " IF NOT EXISTS"
+        if (!result) return NULL;
+
+        memcpy(result, sql, prefix_len);
+        memcpy(result + prefix_len, " IF NOT EXISTS", 14);
+        strcpy(result + prefix_len + 14, s + 12);
+        return result;
+    }
+
+    // Check for CREATE INDEX (without IF NOT EXISTS already)
+    if (strncasecmp(s, "CREATE INDEX ", 13) == 0 &&
+        strncasecmp(s + 13, "IF NOT EXISTS ", 14) != 0) {
+        size_t prefix_len = (s - sql) + 12;
+        size_t rest_len = strlen(s + 12);
+        char *result = malloc(prefix_len + 15 + rest_len + 1);
+        if (!result) return NULL;
+
+        memcpy(result, sql, prefix_len);
+        memcpy(result + prefix_len, " IF NOT EXISTS", 14);
+        strcpy(result + prefix_len + 14, s + 12);
+        return result;
+    }
+
+    // Check for CREATE UNIQUE INDEX
+    if (strncasecmp(s, "CREATE UNIQUE INDEX ", 20) == 0 &&
+        strncasecmp(s + 20, "IF NOT EXISTS ", 14) != 0) {
+        size_t prefix_len = (s - sql) + 19;
+        size_t rest_len = strlen(s + 19);
+        char *result = malloc(prefix_len + 15 + rest_len + 1);
+        if (!result) return NULL;
+
+        memcpy(result, sql, prefix_len);
+        memcpy(result + prefix_len, " IF NOT EXISTS", 14);
+        strcpy(result + prefix_len + 14, s + 19);
+        return result;
+    }
+
+    return strdup(sql);
+}
+
+// ============================================================================
+// DDL Identifier Quote Translation
+// ============================================================================
+
+// Translate 'identifier' -> "identifier" for DDL statements
+// In SQLite, single quotes can be used for identifiers in DDL
+// In PostgreSQL, single quotes are only for string literals
+static char* translate_ddl_quotes(const char *sql) {
+    if (!sql) return NULL;
+
+    // Only process DDL statements
+    const char *s = sql;
+    while (*s && isspace(*s)) s++;
+    int is_ddl = (strncasecmp(s, "CREATE", 6) == 0 ||
+                  strncasecmp(s, "DROP", 4) == 0 ||
+                  strncasecmp(s, "ALTER", 5) == 0);
+
+    if (!is_ddl) {
+        return strdup(sql);
+    }
+
+    char *result = malloc(strlen(sql) * 2 + 1);
+    if (!result) return NULL;
+
+    char *out = result;
+    const char *p = sql;
+    int in_parens = 0;
+
+    while (*p) {
+        // Track parentheses depth
+        if (*p == '(') in_parens++;
+        if (*p == ')') in_parens--;
+
+        // Check for single-quoted identifier (not a string literal)
+        if (*p == '\'') {
+            // Check if this looks like an identifier context
+            const char *back = p - 1;
+            while (back > sql && isspace(*back)) back--;
+
+            int is_identifier = 0;
+
+            // After CREATE TABLE, CREATE INDEX, ON, ADD, etc.
+            if (back >= sql) {
+                // After keywords like TABLE, INDEX, ON, UNIQUE, ADD, etc.
+                if ((back >= sql + 4 && strncasecmp(back - 4, "TABLE", 5) == 0) ||
+                    (back >= sql + 4 && strncasecmp(back - 4, "INDEX", 5) == 0) ||
+                    (back >= sql + 1 && strncasecmp(back - 1, "ON", 2) == 0) ||
+                    (back >= sql + 5 && strncasecmp(back - 5, "UNIQUE", 6) == 0) ||
+                    (back >= sql + 2 && strncasecmp(back - 2, "ADD", 3) == 0) ||
+                    (back >= sql + 5 && strncasecmp(back - 5, "COLUMN", 6) == 0) ||
+                    (back >= sql + 3 && strncasecmp(back - 3, "DROP", 4) == 0) ||
+                    *back == '(' || *back == ',' || *back == '.') {
+                    is_identifier = 1;
+                }
+            }
+
+            // If at start after CREATE, also an identifier
+            if (p > sql) {
+                const char *keyword = sql;
+                while (*keyword && isspace(*keyword)) keyword++;
+                if ((strncasecmp(keyword, "CREATE TABLE ", 13) == 0 ||
+                     strncasecmp(keyword, "CREATE INDEX ", 13) == 0 ||
+                     strncasecmp(keyword, "CREATE UNIQUE INDEX ", 20) == 0) &&
+                    p > keyword) {
+                    const char *check = p - 1;
+                    while (check > keyword && isspace(*check)) check--;
+                    if (check > keyword && (
+                        (check >= keyword + 4 && strncasecmp(check - 4, "TABLE", 5) == 0) ||
+                        (check >= keyword + 4 && strncasecmp(check - 4, "INDEX", 5) == 0))) {
+                        is_identifier = 1;
+                    }
+                }
+            }
+
+            // Inside column definitions after ( or ,
+            if (in_parens > 0 && back >= sql && (*back == '(' || *back == ',')) {
+                is_identifier = 1;
+            }
+
+            if (is_identifier) {
+                // Convert to double-quoted identifier
+                *out++ = '"';
+                p++;
+
+                // Copy content until closing single quote
+                while (*p && *p != '\'') {
+                    *out++ = *p++;
+                }
+
+                if (*p == '\'') {
+                    *out++ = '"';
+                    p++;
+                }
+                continue;
+            }
+        }
+
+        *out++ = *p++;
+    }
+
+    *out = '\0';
+    return result;
+}
+
+// ============================================================================
 // Keyword Translation
 // ============================================================================
 
@@ -1029,6 +1568,67 @@ char* sql_translate_keywords(const char *sql) {
     free(current);
     current = temp;
 
+    // Translate sqlite_master to PostgreSQL equivalent
+    // SQLite's sqlite_master contains: type, name, tbl_name, rootpage, sql
+    // We emulate this with a UNION of tables, views, and indexes from information_schema
+    if (strcasestr(current, "sqlite_master") || strcasestr(current, "sqlite_schema")) {
+        // Replace simple SELECT * FROM sqlite_master queries
+        // with a PostgreSQL equivalent
+        const char *sqlite_master_pg =
+            "(SELECT "
+            "CASE WHEN table_type = 'BASE TABLE' THEN 'table' "
+            "     WHEN table_type = 'VIEW' THEN 'view' END AS type, "
+            "table_name AS name, "
+            "table_name AS tbl_name, "
+            "0 AS rootpage, "
+            "'' AS sql "
+            "FROM information_schema.tables "
+            "WHERE table_schema = current_schema() "
+            "UNION ALL "
+            "SELECT 'index' AS type, "
+            "indexname AS name, "
+            "tablename AS tbl_name, "
+            "0 AS rootpage, "
+            "indexdef AS sql "
+            "FROM pg_indexes "
+            "WHERE schemaname = current_schema()) AS _sqlite_master_";
+
+        // Replace various forms - use placeholder first then do single replacement
+        // Replace "main".sqlite_master first (most specific)
+        temp = str_replace_nocase(current, "\"main\".sqlite_master", sqlite_master_pg);
+        if (strcmp(temp, current) != 0) {
+            free(current);
+            current = temp;
+        } else {
+            free(temp);
+            // Try main.sqlite_master
+            temp = str_replace_nocase(current, "main.sqlite_master", sqlite_master_pg);
+            if (strcmp(temp, current) != 0) {
+                free(current);
+                current = temp;
+            } else {
+                free(temp);
+                // Try bare sqlite_master
+                temp = str_replace_nocase(current, "sqlite_master", sqlite_master_pg);
+                if (strcmp(temp, current) != 0) {
+                    free(current);
+                    current = temp;
+                } else {
+                    free(temp);
+                    // Try sqlite_schema
+                    temp = str_replace_nocase(current, "sqlite_schema", sqlite_master_pg);
+                    free(current);
+                    current = temp;
+                }
+            }
+        }
+
+        // Remove ORDER BY rowid (not applicable for our emulated table)
+        temp = str_replace_nocase(current, " ORDER BY rowid", "");
+        free(current);
+        current = temp;
+    }
+
     // Remove INDEXED BY hints (SQLite-specific)
     // Pattern: "indexed by index_name" - need regex-like removal
     // For now, handle common patterns
@@ -1059,6 +1659,74 @@ char* sql_translate_keywords(const char *sql) {
     }
 
     return current;
+}
+
+// ============================================================================
+// Operator Spacing Fix
+// ============================================================================
+
+// Fix operator spacing: !=-1 -> != -1, >=-1 -> >= -1, etc.
+// PostgreSQL doesn't recognize !=-  or >=- as operators
+static char* fix_operator_spacing(const char *sql) {
+    if (!sql) return NULL;
+
+    char *result = malloc(strlen(sql) * 2 + 1);
+    if (!result) return NULL;
+
+    char *out = result;
+    const char *p = sql;
+    int in_string = 0;
+    char string_char = 0;
+
+    while (*p) {
+        // Track string literals
+        if ((*p == '\'' || *p == '"') && (p == sql || *(p-1) != '\\')) {
+            if (!in_string) {
+                in_string = 1;
+                string_char = *p;
+            } else if (*p == string_char) {
+                in_string = 0;
+            }
+            *out++ = *p++;
+            continue;
+        }
+
+        if (in_string) {
+            *out++ = *p++;
+            continue;
+        }
+
+        // Check for operators followed immediately by - and digit
+        // Patterns: !=- , <>- , >=- , <=- , =- (but not ==-)
+        if ((p[0] == '!' && p[1] == '=' && p[2] == '-' && isdigit(p[3])) ||
+            (p[0] == '<' && p[1] == '>' && p[2] == '-' && isdigit(p[3])) ||
+            (p[0] == '>' && p[1] == '=' && p[2] == '-' && isdigit(p[3])) ||
+            (p[0] == '<' && p[1] == '=' && p[2] == '-' && isdigit(p[3]))) {
+            // Copy the two-char operator
+            *out++ = *p++;
+            *out++ = *p++;
+            // Add space before the negative number
+            *out++ = ' ';
+            continue;
+        }
+
+        // Single char operators followed by -digit: =-, >-, <-
+        // But be careful: <- could be valid, so only fix when followed by digit
+        if ((p[0] == '=' && p[1] == '-' && isdigit(p[2]) && (p == sql || (p[-1] != '!' && p[-1] != '>' && p[-1] != '<'))) ||
+            (p[0] == '>' && p[1] == '-' && isdigit(p[2]) && (p == sql || p[-1] != '<')) ||
+            (p[0] == '<' && p[1] == '-' && isdigit(p[2]) && (p == sql || p[-1] != '>'))) {
+            // Copy the operator
+            *out++ = *p++;
+            // Add space before the negative number
+            *out++ = ' ';
+            continue;
+        }
+
+        *out++ = *p++;
+    }
+
+    *out = '\0';
+    return result;
 }
 
 // ============================================================================
@@ -1112,7 +1780,31 @@ sql_translation_t sql_translate(const char *sqlite_sql) {
         return result;
     }
 
-    result.sql = step4;
+    // Step 5: Translate DDL single-quoted identifiers
+    char *step5 = translate_ddl_quotes(step4);
+    free(step4);
+    if (!step5) {
+        strcpy(result.error, "DDL quote translation failed");
+        return result;
+    }
+
+    // Step 6: Add IF NOT EXISTS to CREATE TABLE/INDEX
+    char *step6 = add_if_not_exists(step5);
+    free(step5);
+    if (!step6) {
+        strcpy(result.error, "IF NOT EXISTS translation failed");
+        return result;
+    }
+
+    // Step 7: Fix operator spacing (!=-1 -> != -1)
+    char *step7 = fix_operator_spacing(step6);
+    free(step6);
+    if (!step7) {
+        strcpy(result.error, "Operator spacing fix failed");
+        return result;
+    }
+
+    result.sql = step7;
     result.success = 1;
 
     return result;

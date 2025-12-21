@@ -28,6 +28,9 @@
 
 #include "sql_translator.h"
 
+// PostgreSQL-only mode: reads and writes go to PostgreSQL, SQLite is bypassed
+#define PG_READ_ENABLED 1
+
 // DYLD interposing structure
 #define DYLD_INTERPOSE(_replacement, _original) \
     __attribute__((used)) static struct { \
@@ -79,6 +82,9 @@ typedef struct pg_connection {
     int is_pg_active;    // Whether we're using PostgreSQL
     int in_transaction;
     pthread_mutex_t mutex;
+    int last_changes;           // Track rows affected by last write
+    sqlite3_int64 last_insert_rowid;  // Track last inserted row ID
+    sqlite3_int64 last_generator_metadata_id;  // Track metadata_item_id from last generator URI
 } pg_connection_t;
 
 typedef struct pg_stmt {
@@ -121,6 +127,9 @@ static struct {
 } stmt_map[MAX_STATEMENTS];
 static int stmt_count = 0;
 static pthread_mutex_t stmt_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// Global metadata_id tracking - shared across all connections
+static sqlite3_int64 global_generator_metadata_id = 0;
 
 // ============================================================================
 // Logging
@@ -200,12 +209,11 @@ static int should_redirect(const char *filename) {
     return 0;
 }
 
-// SQLite-specific functions/commands to skip on PostgreSQL
-static const char *SQLITE_ONLY_PATTERNS[] = {
+// SQLite-specific commands that should be SKIPPED entirely (no-op, return success)
+// These are SQLite internals that don't exist in PostgreSQL and don't affect data
+static const char *SQLITE_SKIP_PATTERNS[] = {
     "icu_load_collation",
-    "fts3_tokenizer",    // SQLite FTS3 full-text search
-    "fts4",              // SQLite FTS4
-    "fts5",              // SQLite FTS5
+    "fts3_tokenizer",    // SQLite FTS3 tokenizer setup
     "SELECT load_extension",
     "VACUUM",
     "PRAGMA",
@@ -216,27 +224,22 @@ static const char *SQLITE_ONLY_PATTERNS[] = {
     "ROLLBACK",          // Avoid "no transaction in progress" warnings
     "SAVEPOINT",
     "RELEASE SAVEPOINT",
-    // SQLite allows partial GROUP BY, PostgreSQL doesn't
-    "metadata_item_clusterings GROUP BY",
-    "metadata_item_views",  // Complex GROUP BY issues
-    // Complex JOIN queries with aliases that PostgreSQL handles differently
-    "grandparents.id",
-    "parents.id=metadata_items.parent_id",
     NULL
 };
 
-static int is_sqlite_only(const char *sql) {
+// Check if SQL should be skipped entirely (SQLite internals, no-op for PostgreSQL)
+static int should_skip_sql(const char *sql) {
     if (!sql) return 0;
 
     // Skip whitespace at start
     while (*sql && (*sql == ' ' || *sql == '\t' || *sql == '\n')) sql++;
 
-    for (int i = 0; SQLITE_ONLY_PATTERNS[i]; i++) {
-        if (strncasecmp(sql, SQLITE_ONLY_PATTERNS[i], strlen(SQLITE_ONLY_PATTERNS[i])) == 0) {
+    for (int i = 0; SQLITE_SKIP_PATTERNS[i]; i++) {
+        if (strncasecmp(sql, SQLITE_SKIP_PATTERNS[i], strlen(SQLITE_SKIP_PATTERNS[i])) == 0) {
             return 1;
         }
         // Also check if it appears anywhere in the SQL
-        if (strcasestr(sql, SQLITE_ONLY_PATTERNS[i])) {
+        if (strcasestr(sql, SQLITE_SKIP_PATTERNS[i])) {
             return 1;
         }
     }
@@ -247,6 +250,25 @@ static pg_connection_t* find_pg_connection(sqlite3 *db) {
     pthread_mutex_lock(&conn_mutex);
     for (int i = 0; i < connection_count; i++) {
         if (connections[i] && connections[i]->shadow_db == db) {
+            pthread_mutex_unlock(&conn_mutex);
+            return connections[i];
+        }
+    }
+    // Debug: log if we have connections but couldn't find a match
+    if (connection_count > 0) {
+        // Don't log for every call - only when we might have expected a match
+        // This is done in the caller now
+    }
+    pthread_mutex_unlock(&conn_mutex);
+    return NULL;
+}
+
+// Find connection by checking if db path matches (fallback for cached stmts)
+static pg_connection_t* find_any_pg_connection_for_library(void) {
+    pthread_mutex_lock(&conn_mutex);
+    for (int i = 0; i < connection_count; i++) {
+        if (connections[i] && connections[i]->is_pg_active &&
+            strstr(connections[i]->db_path, "com.plexapp.plugins.library.db")) {
             pthread_mutex_unlock(&conn_mutex);
             return connections[i];
         }
@@ -281,6 +303,114 @@ static int is_read_operation(const char *sql) {
     if (strncasecmp(sql, "SELECT", 6) == 0) return 1;
 
     return 0;
+}
+
+// Simple string replace for fixing IN clauses
+static char* simple_str_replace(const char *str, const char *old, const char *new_str) {
+    if (!str || !old || !new_str) return NULL;
+
+    const char *pos = strstr(str, old);
+    if (!pos) return NULL;
+
+    size_t old_len = strlen(old);
+    size_t new_len = strlen(new_str);
+    size_t result_len = strlen(str) - old_len + new_len;
+
+    char *result = malloc(result_len + 1);
+    if (!result) return NULL;
+
+    size_t prefix_len = pos - str;
+    memcpy(result, str, prefix_len);
+    memcpy(result + prefix_len, new_str, new_len);
+    strcpy(result + prefix_len + new_len, pos + old_len);
+
+    return result;
+}
+
+// Extract metadata_item_id from play_queue_generators URI
+// URI format: library://x/item/%2Flibrary%2Fmetadata%2F<ID>
+static sqlite3_int64 extract_metadata_id_from_generator_sql(const char *sql) {
+    if (!sql) return 0;
+
+    // Look for play_queue_generators INSERT with URI
+    if (!strcasestr(sql, "play_queue_generators")) return 0;
+    if (!strcasestr(sql, "INSERT")) return 0;
+
+    // Find the URI pattern: %2Fmetadata%2F followed by digits
+    const char *pattern = "%2Fmetadata%2F";
+    const char *pos = strstr(sql, pattern);
+    if (!pos) {
+        // Also try URL-decoded version
+        pattern = "/metadata/";
+        pos = strstr(sql, pattern);
+    }
+    if (!pos) return 0;
+
+    // Move past the pattern
+    pos += strlen(pattern);
+
+    // Extract the numeric ID
+    sqlite3_int64 id = 0;
+    while (*pos >= '0' && *pos <= '9') {
+        id = id * 10 + (*pos - '0');
+        pos++;
+    }
+
+    return id;
+}
+
+// Convert INSERT INTO metadata_item_settings to upsert with ON CONFLICT
+// Also changes view_count from 0 to 1 for marking as watched
+// Returns malloc'd string that caller must free, or NULL if not applicable
+static char* convert_metadata_settings_insert_to_upsert(const char *sql) {
+    if (!sql) return NULL;
+
+    // Check if this is an INSERT INTO metadata_item_settings
+    const char *table_name = "metadata_item_settings";
+
+    // Find INSERT INTO
+    if (!strcasestr(sql, "INSERT INTO")) return NULL;
+
+    // Check if it's metadata_item_settings
+    if (!strcasestr(sql, table_name)) return NULL;
+
+    // Check if already has ON CONFLICT or RETURNING
+    if (strcasestr(sql, "ON CONFLICT")) return NULL;
+    if (strcasestr(sql, "RETURNING")) return NULL;
+
+    // ON CONFLICT clause to handle duplicates
+    // view_count logic:
+    // - If existing view_count > 0 and EXCLUDED is 0: this is "mark as unwatched" → use 0
+    // - Otherwise: use at least 1 (mark as watched)
+    // Note: We DON'T modify VALUES, so EXCLUDED.view_count = what Plex sent (0)
+    const char *on_conflict =
+        " ON CONFLICT (account_id, guid) DO UPDATE SET "
+        "rating = COALESCE(EXCLUDED.rating, plex.metadata_item_settings.rating), "
+        "view_offset = EXCLUDED.view_offset, "
+        "view_count = CASE WHEN plex.metadata_item_settings.view_count > 0 AND EXCLUDED.view_count = 0 "
+                     "THEN 0 ELSE GREATEST(EXCLUDED.view_count, plex.metadata_item_settings.view_count, 1) END, "
+        "last_viewed_at = CASE WHEN plex.metadata_item_settings.view_count > 0 AND EXCLUDED.view_count = 0 "
+                         "THEN NULL ELSE COALESCE(EXCLUDED.last_viewed_at, EXTRACT(EPOCH FROM NOW())::bigint) END, "
+        "updated_at = COALESCE(EXCLUDED.updated_at, EXTRACT(EPOCH FROM NOW())::bigint), "
+        "skip_count = EXCLUDED.skip_count, "
+        "last_skipped_at = EXCLUDED.last_skipped_at, "
+        "changed_at = COALESCE(EXCLUDED.changed_at, EXTRACT(EPOCH FROM NOW())::bigint), "
+        "extra_data = COALESCE(EXCLUDED.extra_data, plex.metadata_item_settings.extra_data), "
+        "last_rated_at = COALESCE(EXCLUDED.last_rated_at, plex.metadata_item_settings.last_rated_at) "
+        "RETURNING id";
+
+    // Calculate size and build result
+    size_t sql_len = strlen(sql);
+    size_t total_len = sql_len + strlen(on_conflict) + 1;
+
+    char *result = malloc(total_len);
+    if (!result) return NULL;
+
+    // DON'T modify VALUES - let Plex's view_count=0 pass through
+    // ON CONFLICT will handle the logic based on existing row state
+    snprintf(result, total_len, "%s%s", sql, on_conflict);
+
+    return result;
 }
 
 // Statement tracking functions
@@ -473,11 +603,20 @@ static int my_sqlite3_close_v2(sqlite3 *db) {
 static int my_sqlite3_exec(sqlite3 *db, const char *sql,
                           int (*callback)(void*, int, char**, char**),
                           void *arg, char **errmsg) {
+    // Debug: log all exec calls
+    if (is_write_operation(sql)) {
+        log_message("EXEC WRITE: %.300s", sql);
+    }
+    // Log all play_queue related queries
+    if (strstr(sql, "play_queue")) {
+        log_message("EXEC (play_queue): %.500s", sql);
+    }
+
     pg_connection_t *pg_conn = find_pg_connection(db);
 
     if (pg_conn && pg_conn->conn && pg_conn->is_pg_active) {
         // Skip SQLite-only commands
-        if (is_sqlite_only(sql)) {
+        if (should_skip_sql(sql)) {
             // Just log and skip PostgreSQL execution
             // log_message("SKIP SQLite-only: %.50s...", sql);
         } else {
@@ -495,13 +634,11 @@ static int my_sqlite3_exec(sqlite3 *db, const char *sql,
             sql_translation_free(&trans);
         }
 
-#if SQLITE_DISABLED
         // PostgreSQL-only mode: skip SQLite for redirected databases
         return SQLITE_OK;
-#endif
     }
 
-    // Execute on SQLite (for non-redirected DBs or when SQLITE_DISABLED is off)
+    // Execute on SQLite for non-redirected DBs only
     return sqlite3_exec(db, sql, callback, arg, errmsg);
 }
 
@@ -511,39 +648,97 @@ static int my_sqlite3_exec(sqlite3 *db, const char *sql,
 
 static int my_sqlite3_prepare_v2(sqlite3 *db, const char *zSql, int nByte,
                                   sqlite3_stmt **ppStmt, const char **pzTail) {
-    // Always prepare on SQLite first
-    int rc = sqlite3_prepare_v2(db, zSql, nByte, ppStmt, pzTail);
-
-    if (rc != SQLITE_OK || !*ppStmt) {
-        return rc;
-    }
-
     // Check if this is a redirected database
     pg_connection_t *pg_conn = find_pg_connection(db);
-
-    // Track both reads and writes for PostgreSQL
     int is_write = is_write_operation(zSql);
     int is_read = is_read_operation(zSql);
 
-    if (pg_conn && pg_conn->conn && pg_conn->is_pg_active && (is_write || is_read)) {
-        // Skip SQLite-only statements
-        if (is_sqlite_only(zSql)) {
-            return rc;
+    // Debug: log ALL SQL to catch anything we might miss
+    if (is_write) {
+        log_message("PREPARE_V2 WRITE: %.300s", zSql);
+    }
+    if (is_read) {
+        // Log reads, especially those with empty IN clauses or play_queue tables
+        if (strstr(zSql, " in ()") || strstr(zSql, " IN ()")) {
+            log_message("PREPARE_V2 READ (EMPTY IN!): %.500s", zSql);
+        } else if (strstr(zSql, "metadata_items.id in")) {
+            log_message("PREPARE_V2 READ (has IN): %.500s", zSql);
         }
+        // Always log play_queue queries
+        if (strstr(zSql, "play_queue") || strstr(zSql, "PLAY_QUEUE")) {
+            log_message("PREPARE_V2 READ (play_queue): %.500s", zSql);
+        }
+    }
 
+    // For redirected databases in PostgreSQL-only mode, clean up SQL for SQLite
+    // Only remove problematic things like "collate icu_root", NOT full PG translation
+    char *cleaned_sql = NULL;
+    const char *sql_for_sqlite = zSql;
+
+    // Clean "collate icu_root" for SQLite (it doesn't have ICU loaded)
+    if (pg_conn && pg_conn->conn && pg_conn->is_pg_active && (is_write || is_read)) {
+        if (!should_skip_sql(zSql) && strcasestr(zSql, "collate icu_root")) {
+            size_t len = strlen(zSql);
+            cleaned_sql = malloc(len + 1);
+            if (cleaned_sql) {
+                strcpy(cleaned_sql, zSql);
+                char *pos;
+                while ((pos = strcasestr(cleaned_sql, " collate icu_root")) != NULL) {
+                    memmove(pos, pos + 17, strlen(pos + 17) + 1);
+                }
+                sql_for_sqlite = cleaned_sql;
+            }
+        }
+    }
+
+    // Prepare on SQLite (with cleaned SQL if needed)
+    int rc = sqlite3_prepare_v2(db, sql_for_sqlite,
+                                cleaned_sql ? -1 : nByte,
+                                ppStmt, pzTail);
+
+    if (rc != SQLITE_OK || !*ppStmt) {
+        if (cleaned_sql) free(cleaned_sql);
+        return rc;
+    }
+
+    if (pg_conn && pg_conn->conn && pg_conn->is_pg_active && (is_write || is_read)) {
         // Create pg_stmt_t to track this statement
         pg_stmt_t *pg_stmt = calloc(1, sizeof(pg_stmt_t));
         if (pg_stmt) {
             pg_stmt->conn = pg_conn;
             pg_stmt->sql = strdup(zSql);
-            pg_stmt->is_pg = is_write ? 1 : 2;  // 1 = write, 2 = read
 
-            // Translate SQL for PostgreSQL
-            sql_translation_t trans = sql_translate(zSql);
-            if (trans.success && trans.sql) {
-                pg_stmt->pg_sql = strdup(trans.sql);
+            // Check if this should be skipped (SQLite internals)
+            if (should_skip_sql(zSql)) {
+                pg_stmt->is_pg = 3;  // 3 = skip (no-op)
+                log_message("SKIP (no-op): %.200s", zSql);
+            } else {
+                pg_stmt->is_pg = is_write ? 1 : 2;  // 1 = write, 2 = read
+
+                // Translate SQL for PostgreSQL (full translation)
+                sql_translation_t trans = sql_translate(zSql);
+                if (trans.success && trans.sql) {
+                    // Check if this has empty IN () and we have a saved metadata_id
+                    if ((strstr(trans.sql, "IN (NULL)") || strstr(trans.sql, "in (NULL)")) &&
+                        global_generator_metadata_id > 0 &&
+                        strstr(trans.sql, "metadata_items")) {
+                        // Substitute the saved metadata_id for IN (NULL)
+                        char id_str[32];
+                        snprintf(id_str, sizeof(id_str), "IN (%lld)", global_generator_metadata_id);
+                        char *fixed = simple_str_replace(trans.sql, "IN (NULL)", id_str);
+                        if (!fixed) fixed = simple_str_replace(trans.sql, "in (NULL)", id_str);
+                        if (fixed) {
+                            pg_stmt->pg_sql = fixed;
+                            log_message("PREPARE: Fixed empty IN with metadata_id=%lld (global)", global_generator_metadata_id);
+                        } else {
+                            pg_stmt->pg_sql = strdup(trans.sql);
+                        }
+                    } else {
+                        pg_stmt->pg_sql = strdup(trans.sql);
+                    }
+                }
+                sql_translation_free(&trans);
             }
-            sql_translation_free(&trans);
 
             // Count parameters (number of ? in SQL)
             const char *p = zSql;
@@ -556,11 +751,60 @@ static int my_sqlite3_prepare_v2(sqlite3 *db, const char *zSql, int nByte,
             // Register the statement mapping
             register_stmt(*ppStmt, pg_stmt);
 
-            // log_message("PREPARE %s: %s (params=%d)", is_write ? "WRITE" : "READ", zSql, pg_stmt->param_count);
+            if (is_write) {
+                log_message("PREPARE WRITE: %.200s", zSql);
+            }
         }
     }
 
+    if (cleaned_sql) free(cleaned_sql);
     return rc;
+}
+
+// Also intercept sqlite3_prepare (the older API without _v2)
+// Note: We call sqlite3_prepare_v2 internally which will be intercepted
+static int my_sqlite3_prepare(sqlite3 *db, const char *zSql, int nByte,
+                              sqlite3_stmt **ppStmt, const char **pzTail) {
+    // Log to see if this path is used
+    if (is_write_operation(zSql)) {
+        log_message("PREPARE (non-v2) WRITE: %.300s", zSql);
+    }
+    // Use sqlite3_prepare_v2 which will go through our interpose
+    // The _v2 version has better error handling anyway
+    return sqlite3_prepare_v2(db, zSql, nByte, ppStmt, pzTail);
+}
+
+// Helper to convert UTF-16 to UTF-8 for logging
+static char* utf16_to_utf8(const void *zSql16) {
+    if (!zSql16) return NULL;
+    // Count UTF-16 length
+    const uint16_t *p = (const uint16_t*)zSql16;
+    size_t len = 0;
+    while (p[len]) len++;
+    if (len == 0) return strdup("");
+
+    // Simple conversion (ASCII only for logging)
+    char *utf8 = malloc(len + 1);
+    if (!utf8) return NULL;
+    for (size_t i = 0; i < len; i++) {
+        utf8[i] = (p[i] < 128) ? (char)p[i] : '?';
+    }
+    utf8[len] = '\0';
+    return utf8;
+}
+
+// Intercept sqlite3_prepare16_v2 (UTF-16 version)
+static int my_sqlite3_prepare16_v2(sqlite3 *db, const void *zSql, int nByte,
+                                    sqlite3_stmt **ppStmt, const void **pzTail) {
+    // Convert to UTF-8 for logging and checking
+    char *utf8_sql = utf16_to_utf8(zSql);
+    if (utf8_sql && is_write_operation(utf8_sql)) {
+        log_message("PREPARE16_V2 WRITE: %.300s", utf8_sql);
+    }
+    if (utf8_sql) free(utf8_sql);
+
+    // Call the original - we don't redirect UTF-16 queries for now, just log them
+    return sqlite3_prepare16_v2(db, zSql, nByte, ppStmt, pzTail);
 }
 
 static int my_sqlite3_bind_int(sqlite3_stmt *pStmt, int idx, int val) {
@@ -679,6 +923,102 @@ static int my_sqlite3_bind_null(sqlite3_stmt *pStmt, int idx) {
 static int my_sqlite3_step(sqlite3_stmt *pStmt) {
     pg_stmt_t *pg_stmt = find_pg_stmt(pStmt);
 
+    // For skipped statements (is_pg == 3), just return SQLITE_DONE
+    if (pg_stmt && pg_stmt->is_pg == 3) {
+        return SQLITE_DONE;
+    }
+
+    // Handle statements that weren't prepared through our shim (e.g., cached at startup)
+    if (!pg_stmt) {
+        sqlite3 *db = sqlite3_db_handle(pStmt);
+        const char *sql_check = sqlite3_sql(pStmt);
+
+        pg_connection_t *pg_conn = find_pg_connection(db);
+
+        // Fallback: if db doesn't match, try to find any active library connection
+        if (!pg_conn && sql_check && is_write_operation(sql_check)) {
+            pg_conn = find_any_pg_connection_for_library();
+        }
+
+        if (pg_conn && pg_conn->is_pg_active && pg_conn->conn) {
+            // Get the SQL - try expanded first (includes bound values)
+            char *expanded_sql = sqlite3_expanded_sql(pStmt);
+            const char *sql = expanded_sql ? expanded_sql : sqlite3_sql(pStmt);
+
+            if (sql && is_write_operation(sql)) {
+
+                // Translate and execute on PostgreSQL
+                sql_translation_t trans = sql_translate(sql);
+                if (trans.success && trans.sql) {
+                    // For INSERTs, handle upsert for metadata_item_settings or add RETURNING id
+                    char *exec_sql = trans.sql;
+                    char *insert_sql = NULL;
+                    if (strncasecmp(sql, "INSERT", 6) == 0) {
+                        // First try to convert to upsert for metadata_item_settings
+                        insert_sql = convert_metadata_settings_insert_to_upsert(trans.sql);
+                        if (insert_sql) {
+                            exec_sql = insert_sql;
+                            log_message("STEP CACHED INSERT converted to UPSERT: %.300s", exec_sql);
+                        } else if (!strstr(trans.sql, "RETURNING")) {
+                            // Add RETURNING id if not already present
+                            size_t len = strlen(trans.sql);
+                            insert_sql = malloc(len + 20);
+                            if (insert_sql) {
+                                snprintf(insert_sql, len + 20, "%s RETURNING id", trans.sql);
+                                exec_sql = insert_sql;
+                            }
+                        }
+                    }
+
+                    PGresult *res = PQexec(pg_conn->conn, exec_sql);
+                    ExecStatusType status = PQresultStatus(res);
+                    sqlite3_int64 this_insert_id = 0;  // Track ID from THIS specific insert
+
+                    if (status != PGRES_COMMAND_OK && status != PGRES_TUPLES_OK) {
+                        log_message("STEP CACHED WRITE PG error: %s\nSQL: %s",
+                                    PQerrorMessage(pg_conn->conn), exec_sql);
+                        pg_conn->last_changes = 0;
+                    } else {
+                        const char *cmd_tuples = PQcmdTuples(res);
+                        int affected = cmd_tuples && cmd_tuples[0] ? atoi(cmd_tuples) : 1;
+                        pg_conn->last_changes = affected;
+
+                        // For INSERTs with RETURNING, get the new id
+                        if (strncasecmp(sql, "INSERT", 6) == 0 &&
+                            status == PGRES_TUPLES_OK && PQntuples(res) > 0) {
+                            const char *id_str = PQgetvalue(res, 0, 0);
+                            if (id_str && *id_str) {
+                                this_insert_id = atoll(id_str);
+                                pg_conn->last_insert_rowid = this_insert_id;
+                                log_message("STEP CACHED INSERT OK (id=%lld): %.200s",
+                                            this_insert_id, trans.sql);
+
+                                // For play_queue_generators, extract metadata_id from URI (save globally for cross-connection access)
+                                sqlite3_int64 meta_id = extract_metadata_id_from_generator_sql(sql);
+                                if (meta_id > 0) {
+                                    global_generator_metadata_id = meta_id;
+                                    log_message("  -> Extracted metadata_id=%lld from generator URI (global)", meta_id);
+                                }
+                            }
+                        } else {
+                            log_message("STEP CACHED WRITE OK (%d rows): %.200s", affected, trans.sql);
+                        }
+                    }
+
+                    if (insert_sql) free(insert_sql);
+                    PQclear(res);
+
+                    // PostgreSQL-only mode: don't execute on SQLite
+                    if (expanded_sql) sqlite3_free(expanded_sql);
+                    sql_translation_free(&trans);
+                    return SQLITE_DONE;
+                }  // close: if (trans.success && trans.sql)
+            }  // close: if (sql && is_write_operation(sql))
+
+            if (expanded_sql) sqlite3_free(expanded_sql);
+        }
+    }
+
     // Execute on PostgreSQL
     if (pg_stmt && pg_stmt->pg_sql && pg_stmt->conn && pg_stmt->conn->conn) {
         // For reads (is_pg == 2), only execute once and store result
@@ -693,6 +1033,12 @@ static int my_sqlite3_step(sqlite3_stmt *pStmt) {
                     paramValues[i] = pg_stmt->param_values[i];
                     paramLengths[i] = pg_stmt->param_lengths[i];
                     paramFormats[i] = pg_stmt->param_formats[i];
+                }
+
+                // Debug: log param count and first few param values
+                log_message("STEP READ executing: param_count=%d", pg_stmt->param_count);
+                for (int dbg = 0; dbg < pg_stmt->param_count && dbg < 4; dbg++) {
+                    log_message("  param[%d] = %s", dbg, paramValues[dbg] ? paramValues[dbg] : "(NULL)");
                 }
 
                 pg_stmt->result = PQexecParams(
@@ -713,6 +1059,15 @@ static int my_sqlite3_step(sqlite3_stmt *pStmt) {
                     pg_stmt->current_row = 0;
                     log_message("STEP READ: %d rows, %d cols for: %.500s",
                                 pg_stmt->num_rows, pg_stmt->num_cols, pg_stmt->pg_sql);
+                    // For the 173-col playback query that returns 0 rows, log more
+                    if (pg_stmt->num_rows == 0 && pg_stmt->num_cols > 100) {
+                        // Log the WHERE clause part of the SQL
+                        const char *where = strstr(pg_stmt->pg_sql, "where ");
+                        if (where) {
+                            log_message("  WHERE clause: %.1000s", where);
+                        }
+                    }
+                    
                 } else if (status != PGRES_COMMAND_OK) {
                     log_message("STEP PG read error: %s\nSQL: %s",
                                 PQerrorMessage(pg_stmt->conn->conn), pg_stmt->pg_sql);
@@ -763,25 +1118,36 @@ static int my_sqlite3_step(sqlite3_stmt *pStmt) {
             if (status != PGRES_COMMAND_OK && status != PGRES_TUPLES_OK) {
                 log_message("STEP PG write error: %s\nSQL: %s",
                             PQerrorMessage(pg_stmt->conn->conn), pg_stmt->pg_sql);
+                pg_stmt->conn->last_changes = 0;
+            } else {
+                // Get number of affected rows
+                const char *cmd_tuples = PQcmdTuples(res);
+                int affected = cmd_tuples && cmd_tuples[0] ? atoi(cmd_tuples) : 1;
+                pg_stmt->conn->last_changes = affected;
+
+                // For INSERT, try to get the OID (last insert rowid)
+                Oid oid = PQoidValue(res);
+                if (oid != InvalidOid) {
+                    pg_stmt->conn->last_insert_rowid = (sqlite3_int64)oid;
+                }
+
+                log_message("STEP WRITE OK (%d rows): %.200s", affected, pg_stmt->pg_sql);
             }
 
             PQclear(res);
         }
     }
 
-#if SQLITE_DISABLED
     // PostgreSQL-only mode: don't execute on SQLite for redirected databases
     if (pg_stmt && pg_stmt->is_pg) {
-        // For reads (is_pg == 2), we already returned above via PG_READ_ENABLED
-        // For writes (is_pg == 1), return success
+        // For writes, return success (already executed on PostgreSQL)
         if (pg_stmt->is_pg == 1) {
             return SQLITE_DONE;
         }
         // For reads that failed on PG, fall through to SQLite as backup
     }
-#endif
 
-    // Execute on SQLite (for non-redirected DBs or as fallback)
+    // Execute on SQLite for non-redirected DBs only
     return sqlite3_step(pStmt);
 }
 
@@ -836,13 +1202,6 @@ static int my_sqlite3_clear_bindings(sqlite3_stmt *pStmt) {
 // Column Value Interception (for reads from PostgreSQL)
 // ============================================================================
 
-// Set to 1 to read from PostgreSQL, 0 to use SQLite (safer for testing)
-#define PG_READ_ENABLED 1
-
-// Set to 1 to completely disable SQLite operations (PostgreSQL only mode)
-// WARNING: Make sure all data is synced to PostgreSQL before enabling!
-#define SQLITE_DISABLED 1
-
 static int my_sqlite3_column_count(sqlite3_stmt *pStmt) {
 #if PG_READ_ENABLED
     pg_stmt_t *pg_stmt = find_pg_stmt(pStmt);
@@ -857,8 +1216,17 @@ static int my_sqlite3_column_type(sqlite3_stmt *pStmt, int idx) {
 #if PG_READ_ENABLED
     pg_stmt_t *pg_stmt = find_pg_stmt(pStmt);
     if (pg_stmt && pg_stmt->is_pg == 2 && pg_stmt->result) {
-        if (pg_stmt->current_row < pg_stmt->num_rows) {
-            if (PQgetisnull(pg_stmt->result, pg_stmt->current_row, idx)) {
+        // Bounds check
+        if (idx < 0 || idx >= pg_stmt->num_cols) {
+            return SQLITE_NULL;
+        }
+        // Allow reading last row even after SQLITE_DONE
+        int row_to_read = pg_stmt->current_row;
+        if (row_to_read >= pg_stmt->num_rows && pg_stmt->num_rows > 0) {
+            row_to_read = pg_stmt->num_rows - 1;
+        }
+        if (row_to_read < pg_stmt->num_rows) {
+            if (PQgetisnull(pg_stmt->result, row_to_read, idx)) {
                 return SQLITE_NULL;
             }
             // Map PostgreSQL OIDs to SQLite types
@@ -906,9 +1274,21 @@ static int my_sqlite3_column_int(sqlite3_stmt *pStmt, int idx) {
 #if PG_READ_ENABLED
     pg_stmt_t *pg_stmt = find_pg_stmt(pStmt);
     if (pg_stmt && pg_stmt->is_pg == 2 && pg_stmt->result) {
-        if (pg_stmt->current_row < pg_stmt->num_rows &&
-            !PQgetisnull(pg_stmt->result, pg_stmt->current_row, idx)) {
-            return pg_value_to_int(PQgetvalue(pg_stmt->result, pg_stmt->current_row, idx));
+        // Bounds check
+        if (idx < 0 || idx >= pg_stmt->num_cols) {
+            return 0;
+        }
+        // Allow reading last row even after SQLITE_DONE
+        int row_to_read = pg_stmt->current_row;
+        if (row_to_read >= pg_stmt->num_rows && pg_stmt->num_rows > 0) {
+            row_to_read = pg_stmt->num_rows - 1;
+        }
+        if (row_to_read < pg_stmt->num_rows) {
+            if (!PQgetisnull(pg_stmt->result, row_to_read, idx)) {
+                const char *val = PQgetvalue(pg_stmt->result, row_to_read, idx);
+                return pg_value_to_int(val);
+            }
+            return 0;
         }
         return 0;
     }
@@ -920,9 +1300,18 @@ static sqlite3_int64 my_sqlite3_column_int64(sqlite3_stmt *pStmt, int idx) {
 #if PG_READ_ENABLED
     pg_stmt_t *pg_stmt = find_pg_stmt(pStmt);
     if (pg_stmt && pg_stmt->is_pg == 2 && pg_stmt->result) {
-        if (pg_stmt->current_row < pg_stmt->num_rows &&
-            !PQgetisnull(pg_stmt->result, pg_stmt->current_row, idx)) {
-            return pg_value_to_int64(PQgetvalue(pg_stmt->result, pg_stmt->current_row, idx));
+        // Bounds check
+        if (idx < 0 || idx >= pg_stmt->num_cols) {
+            return 0;
+        }
+        // Allow reading last row even after SQLITE_DONE
+        int row_to_read = pg_stmt->current_row;
+        if (row_to_read >= pg_stmt->num_rows && pg_stmt->num_rows > 0) {
+            row_to_read = pg_stmt->num_rows - 1;
+        }
+        if (row_to_read < pg_stmt->num_rows &&
+            !PQgetisnull(pg_stmt->result, row_to_read, idx)) {
+            return pg_value_to_int64(PQgetvalue(pg_stmt->result, row_to_read, idx));
         }
         return 0;
     }
@@ -943,9 +1332,18 @@ static double my_sqlite3_column_double(sqlite3_stmt *pStmt, int idx) {
 #if PG_READ_ENABLED
     pg_stmt_t *pg_stmt = find_pg_stmt(pStmt);
     if (pg_stmt && pg_stmt->is_pg == 2 && pg_stmt->result) {
-        if (pg_stmt->current_row < pg_stmt->num_rows &&
-            !PQgetisnull(pg_stmt->result, pg_stmt->current_row, idx)) {
-            return pg_value_to_double(PQgetvalue(pg_stmt->result, pg_stmt->current_row, idx));
+        // Bounds check
+        if (idx < 0 || idx >= pg_stmt->num_cols) {
+            return 0.0;
+        }
+        // Allow reading last row even after SQLITE_DONE
+        int row_to_read = pg_stmt->current_row;
+        if (row_to_read >= pg_stmt->num_rows && pg_stmt->num_rows > 0) {
+            row_to_read = pg_stmt->num_rows - 1;
+        }
+        if (row_to_read < pg_stmt->num_rows &&
+            !PQgetisnull(pg_stmt->result, row_to_read, idx)) {
+            return pg_value_to_double(PQgetvalue(pg_stmt->result, row_to_read, idx));
         }
         return 0.0;
     }
@@ -957,13 +1355,20 @@ static const unsigned char* my_sqlite3_column_text(sqlite3_stmt *pStmt, int idx)
 #if PG_READ_ENABLED
     pg_stmt_t *pg_stmt = find_pg_stmt(pStmt);
     if (pg_stmt && pg_stmt->is_pg == 2 && pg_stmt->result) {
-        if (pg_stmt->current_row < pg_stmt->num_rows) {
-            if (PQgetisnull(pg_stmt->result, pg_stmt->current_row, idx)) {
+        // Bounds check
+        if (idx < 0 || idx >= pg_stmt->num_cols) {
+            return NULL;
+        }
+        // IMPORTANT: Allow reading last row even after SQLITE_DONE (SQLite behavior)
+        int row_to_read = pg_stmt->current_row;
+        if (row_to_read >= pg_stmt->num_rows && pg_stmt->num_rows > 0) {
+            row_to_read = pg_stmt->num_rows - 1;
+        }
+        if (row_to_read < pg_stmt->num_rows) {
+            if (PQgetisnull(pg_stmt->result, row_to_read, idx)) {
                 return NULL;
             }
-            const char *val = PQgetvalue(pg_stmt->result, pg_stmt->current_row, idx);
-            // Empty string should be returned as empty string, not converted
-            return (const unsigned char*)val;
+            return (const unsigned char*)PQgetvalue(pg_stmt->result, row_to_read, idx);
         }
         return NULL;
     }
@@ -975,9 +1380,18 @@ static const void* my_sqlite3_column_blob(sqlite3_stmt *pStmt, int idx) {
 #if PG_READ_ENABLED
     pg_stmt_t *pg_stmt = find_pg_stmt(pStmt);
     if (pg_stmt && pg_stmt->is_pg == 2 && pg_stmt->result) {
-        if (pg_stmt->current_row < pg_stmt->num_rows &&
-            !PQgetisnull(pg_stmt->result, pg_stmt->current_row, idx)) {
-            return PQgetvalue(pg_stmt->result, pg_stmt->current_row, idx);
+        // Bounds check
+        if (idx < 0 || idx >= pg_stmt->num_cols) {
+            return NULL;
+        }
+        // Allow reading last row even after SQLITE_DONE
+        int row_to_read = pg_stmt->current_row;
+        if (row_to_read >= pg_stmt->num_rows && pg_stmt->num_rows > 0) {
+            row_to_read = pg_stmt->num_rows - 1;
+        }
+        if (row_to_read < pg_stmt->num_rows &&
+            !PQgetisnull(pg_stmt->result, row_to_read, idx)) {
+            return PQgetvalue(pg_stmt->result, row_to_read, idx);
         }
         return NULL;
     }
@@ -989,9 +1403,18 @@ static int my_sqlite3_column_bytes(sqlite3_stmt *pStmt, int idx) {
 #if PG_READ_ENABLED
     pg_stmt_t *pg_stmt = find_pg_stmt(pStmt);
     if (pg_stmt && pg_stmt->is_pg == 2 && pg_stmt->result) {
-        if (pg_stmt->current_row < pg_stmt->num_rows &&
-            !PQgetisnull(pg_stmt->result, pg_stmt->current_row, idx)) {
-            return PQgetlength(pg_stmt->result, pg_stmt->current_row, idx);
+        // Bounds check
+        if (idx < 0 || idx >= pg_stmt->num_cols) {
+            return 0;
+        }
+        // Allow reading last row even after SQLITE_DONE
+        int row_to_read = pg_stmt->current_row;
+        if (row_to_read >= pg_stmt->num_rows && pg_stmt->num_rows > 0) {
+            row_to_read = pg_stmt->num_rows - 1;
+        }
+        if (row_to_read < pg_stmt->num_rows &&
+            !PQgetisnull(pg_stmt->result, row_to_read, idx)) {
+            return PQgetlength(pg_stmt->result, row_to_read, idx);
         }
         return 0;
     }
@@ -1003,21 +1426,91 @@ static const char* my_sqlite3_column_name(sqlite3_stmt *pStmt, int idx) {
 #if PG_READ_ENABLED
     pg_stmt_t *pg_stmt = find_pg_stmt(pStmt);
     if (pg_stmt && pg_stmt->is_pg == 2 && pg_stmt->result) {
+        // Bounds check
+        if (idx < 0 || idx >= pg_stmt->num_cols) {
+            return NULL;
+        }
         return PQfname(pg_stmt->result, idx);
     }
 #endif
     return sqlite3_column_name(pStmt, idx);
 }
 
+static int my_sqlite3_data_count(sqlite3_stmt *pStmt) {
+#if PG_READ_ENABLED
+    pg_stmt_t *pg_stmt = find_pg_stmt(pStmt);
+    if (pg_stmt && pg_stmt->is_pg == 2 && pg_stmt->result) {
+        // If we have a valid row, return the column count
+        if (pg_stmt->current_row < pg_stmt->num_rows) {
+            return pg_stmt->num_cols;
+        }
+        return 0;  // No current row
+    }
+#endif
+    return sqlite3_data_count(pStmt);
+}
+
+// ============================================================================
+// Changes and Last Insert Rowid (for write verification)
+// ============================================================================
+
+static int my_sqlite3_changes(sqlite3 *db) {
+    pg_connection_t *pg_conn = find_pg_connection(db);
+    if (pg_conn && pg_conn->is_pg_active) {
+        return pg_conn->last_changes;
+    }
+    return sqlite3_changes(db);
+}
+
+static sqlite3_int64 my_sqlite3_last_insert_rowid(sqlite3 *db) {
+    pg_connection_t *pg_conn = find_pg_connection(db);
+    // Fallback: try to find any library connection if exact match fails
+    if (!pg_conn) {
+        pg_conn = find_any_pg_connection_for_library();
+    }
+    if (pg_conn && pg_conn->is_pg_active) {
+        // If we have a stored rowid, use it
+        if (pg_conn->last_insert_rowid > 0) {
+            sqlite3_int64 rowid = pg_conn->last_insert_rowid;
+            log_message("LAST_INSERT_ROWID returning %lld", rowid);
+            return rowid;
+        }
+        // Otherwise, query PostgreSQL for the last inserted ID
+        PGresult *res = PQexec(pg_conn->conn, "SELECT lastval()");
+        if (PQresultStatus(res) == PGRES_TUPLES_OK && PQntuples(res) > 0) {
+            const char *val = PQgetvalue(res, 0, 0);
+            sqlite3_int64 rowid = val ? atoll(val) : 0;
+            PQclear(res);
+            log_message("LAST_INSERT_ROWID (lastval) returning %lld", rowid);
+            return rowid;
+        }
+        PQclear(res);
+    }
+    return sqlite3_last_insert_rowid(db);
+}
+
+// Intercept sqlite3_get_table for debugging
+static int my_sqlite3_get_table(sqlite3 *db, const char *sql, char ***pazResult, int *pnRow, int *pnColumn, char **pzErrMsg) {
+    if (strstr(sql, "play_queue") || strstr(sql, "generator")) {
+        log_message("GET_TABLE (play_queue/generator): %.500s", sql);
+    }
+    return sqlite3_get_table(db, sql, pazResult, pnRow, pnColumn, pzErrMsg);
+}
+
 // Register interpositions
+DYLD_INTERPOSE(my_sqlite3_get_table, sqlite3_get_table)
 DYLD_INTERPOSE(my_sqlite3_open, sqlite3_open)
 DYLD_INTERPOSE(my_sqlite3_open_v2, sqlite3_open_v2)
 DYLD_INTERPOSE(my_sqlite3_close, sqlite3_close)
 DYLD_INTERPOSE(my_sqlite3_close_v2, sqlite3_close_v2)
 DYLD_INTERPOSE(my_sqlite3_exec, sqlite3_exec)
+DYLD_INTERPOSE(my_sqlite3_changes, sqlite3_changes)
+DYLD_INTERPOSE(my_sqlite3_last_insert_rowid, sqlite3_last_insert_rowid)
 
 // Prepared statement interpositions
+DYLD_INTERPOSE(my_sqlite3_prepare, sqlite3_prepare)
 DYLD_INTERPOSE(my_sqlite3_prepare_v2, sqlite3_prepare_v2)
+DYLD_INTERPOSE(my_sqlite3_prepare16_v2, sqlite3_prepare16_v2)
 DYLD_INTERPOSE(my_sqlite3_bind_int, sqlite3_bind_int)
 DYLD_INTERPOSE(my_sqlite3_bind_int64, sqlite3_bind_int64)
 DYLD_INTERPOSE(my_sqlite3_bind_double, sqlite3_bind_double)
@@ -1039,6 +1532,7 @@ DYLD_INTERPOSE(my_sqlite3_column_text, sqlite3_column_text)
 DYLD_INTERPOSE(my_sqlite3_column_blob, sqlite3_column_blob)
 DYLD_INTERPOSE(my_sqlite3_column_bytes, sqlite3_column_bytes)
 DYLD_INTERPOSE(my_sqlite3_column_name, sqlite3_column_name)
+DYLD_INTERPOSE(my_sqlite3_data_count, sqlite3_data_count)
 
 // ============================================================================
 // Constructor/Destructor
