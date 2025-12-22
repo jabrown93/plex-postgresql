@@ -378,10 +378,21 @@ static char* translate_typeof(const char *sql) {
     free(temp);
 
     // Now translate the type names in comparisons
-    char *temp2 = str_replace(result, "'integer'", "'integer'");  // same
+    // SQLite 'integer' needs to match PostgreSQL 'integer' AND 'bigint'
+    // because bigint columns report 'bigint' in pg_typeof()
+    char *temp2 = str_replace_nocase(result, "in ('integer',", "in ('integer', 'bigint',");
+    if (temp2) {
+        free(result);
+        result = temp2;
+    }
+    // Also handle alternate spacing
+    temp2 = str_replace_nocase(result, "in ( 'integer',", "in ('integer', 'bigint',");
+    if (temp2) {
+        free(result);
+        result = temp2;
+    }
+    temp2 = str_replace(result, "'real'", "'double precision'");
     free(result);
-    temp2 = str_replace(temp2, "'real'", "'double precision'");
-    // Note: SQLite 'integer' could be 'integer' or 'bigint' in PG
 
     return temp2;
 }
@@ -1163,6 +1174,79 @@ static char* translate_distinct_orderby(const char *sql) {
     return strdup(sql);
 }
 
+// Simplify typeof-based fixup patterns
+// SQLite uses dynamic typing, so queries like:
+//   iif(typeof(at) in ('integer', 'real'), at, strftime('%s', at, 'utc'))
+// are used to ensure values are epoch integers. In PostgreSQL, columns have
+// fixed types, so if 'at' is bigint, this whole expression equals 'at'.
+// We simplify these patterns to avoid EXTRACT(EPOCH FROM bigint) errors.
+static char* simplify_typeof_fixup(const char *sql) {
+    if (!sql) return NULL;
+
+    // Pattern: iif(typeof(X) in ('integer', 'real'), X, strftime('%s', X, 'utc'))
+    // The key is that X appears twice - in typeof() and as the true result
+    // We want to replace the whole thing with just X
+
+    char *result = malloc(MAX_SQL_LEN);
+    if (!result) return NULL;
+
+    char *out = result;
+    const char *p = sql;
+
+    while (*p) {
+        // Look for pattern: iif(typeof(
+        if (strncasecmp(p, "iif(typeof(", 11) == 0) {
+            const char *start = p;
+            p += 11;
+
+            // Extract the column/expression name (X)
+            char col_name[256];
+            int col_len = 0;
+            int depth = 1;
+            while (*p && depth > 0 && col_len < 255) {
+                if (*p == '(') depth++;
+                else if (*p == ')') depth--;
+                if (depth > 0) col_name[col_len++] = *p;
+                p++;
+            }
+            col_name[col_len] = '\0';
+
+            // Check if this looks like the pattern we want
+            // Next should be: ) in ('integer'
+            if (strncasecmp(p, " in ('integer'", 14) == 0 ||
+                strncasecmp(p, " in ( 'integer'", 15) == 0) {
+
+                // Find the matching closing ) for the iif()
+                // Skip to find the strftime part and the closing paren
+                int iif_depth = 1;
+                const char *scan = start + 4;  // after "iif("
+                while (*scan && iif_depth > 0) {
+                    if (*scan == '(') iif_depth++;
+                    else if (*scan == ')') iif_depth--;
+                    scan++;
+                }
+
+                // If we found the complete iif(), replace with just col_name
+                if (iif_depth == 0) {
+                    // Copy the column name as the result
+                    strcpy(out, col_name);
+                    out += strlen(col_name);
+                    p = scan;
+                    continue;
+                }
+            }
+
+            // Not the pattern - copy original and continue
+            p = start;
+        }
+
+        *out++ = *p++;
+    }
+
+    *out = '\0';
+    return result;
+}
+
 // Main function translator
 char* sql_translate_functions(const char *sql) {
     if (!sql) return NULL;
@@ -1181,6 +1265,13 @@ char* sql_translate_functions(const char *sql) {
 
     // 0b. Remove DISTINCT when ORDER BY is present (PostgreSQL compatibility)
     temp = translate_distinct_orderby(current);
+    free(current);
+    if (!temp) return NULL;
+    current = temp;
+
+    // 0c. Simplify typeof fixup patterns (must be before iif/typeof translations)
+    // Converts: iif(typeof(x) in ('integer', 'real'), x, strftime('%s', x, 'utc')) -> x
+    temp = simplify_typeof_fixup(current);
     free(current);
     if (!temp) return NULL;
     current = temp;
@@ -1915,7 +2006,31 @@ char* sql_translate_keywords(const char *sql) {
 // Operator Spacing Fix
 // ============================================================================
 
+// Check if the string at position p starts with a SQL keyword (case-insensitive)
+static int starts_with_keyword(const char *p) {
+    static const char *keywords[] = {
+        "from", "where", "join", "inner", "outer", "left", "right", "cross",
+        "on", "and", "or", "not", "in", "like", "between", "order", "group",
+        "having", "limit", "offset", "union", "except", "intersect", "as",
+        "into", "values", "set", "delete", "update", "insert", NULL
+    };
+
+    for (int i = 0; keywords[i]; i++) {
+        size_t len = strlen(keywords[i]);
+        if (strncasecmp(p, keywords[i], len) == 0) {
+            // Make sure it's followed by space, newline, or end of string (word boundary)
+            char next = p[len];
+            if (next == '\0' || next == ' ' || next == '\t' || next == '\n' ||
+                next == '(' || next == ')' || next == ',') {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 // Fix operator spacing: !=-1 -> != -1, >=-1 -> >= -1, etc.
+// Also fix missing space before SQL keywords: 'alias'from -> 'alias' from
 // PostgreSQL doesn't recognize !=-  or >=- as operators
 static char* fix_operator_spacing(const char *sql) {
     if (!sql) return NULL;
@@ -1936,6 +2051,13 @@ static char* fix_operator_spacing(const char *sql) {
                 string_char = *p;
             } else if (*p == string_char) {
                 in_string = 0;
+                // After closing a string, check if next char is a SQL keyword (missing space)
+                // e.g., 'alias'from should become 'alias' from
+                *out++ = *p++;
+                if (!in_string && *p && starts_with_keyword(p)) {
+                    *out++ = ' ';  // Add missing space
+                }
+                continue;
             }
             *out++ = *p++;
             continue;
