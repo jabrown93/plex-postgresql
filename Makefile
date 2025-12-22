@@ -27,7 +27,13 @@ else
     SHARED_FLAGS = -shared
 endif
 
-OBJECTS = src/sql_translator.o src/pg_config.o src/pg_logging.o src/pg_client.o src/pg_statement.o src/fishhook.o
+# SQL Translator modules
+SQL_TR_OBJS = src/sql_translator.o src/sql_tr_helpers.o src/sql_tr_placeholders.o \
+              src/sql_tr_functions.o src/sql_tr_query.o src/sql_tr_types.o \
+              src/sql_tr_quotes.o src/sql_tr_keywords.o
+
+# All objects
+OBJECTS = $(SQL_TR_OBJS) src/pg_config.o src/pg_logging.o src/pg_client.o src/pg_statement.o src/fishhook.o
 
 .PHONY: all clean install test macos linux run stop
 
@@ -49,7 +55,29 @@ linux: src/db_interpose_pg_linux.c src/sql_translator.c include/sql_translator.h
 		-Iinclude -Isrc -lsqlite3 -ldl -lpthread
 
 # Object rules
-src/sql_translator.o: src/sql_translator.c include/sql_translator.h
+# SQL Translator module compilation rules
+src/sql_translator.o: src/sql_translator.c include/sql_translator.h src/sql_translator_internal.h
+	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
+
+src/sql_tr_helpers.o: src/sql_tr_helpers.c src/sql_translator_internal.h
+	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
+
+src/sql_tr_placeholders.o: src/sql_tr_placeholders.c include/sql_translator.h src/sql_translator_internal.h
+	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
+
+src/sql_tr_functions.o: src/sql_tr_functions.c src/sql_translator_internal.h
+	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
+
+src/sql_tr_query.o: src/sql_tr_query.c src/sql_translator_internal.h
+	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
+
+src/sql_tr_types.o: src/sql_tr_types.c include/sql_translator.h src/sql_translator_internal.h
+	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
+
+src/sql_tr_quotes.o: src/sql_tr_quotes.c src/sql_translator_internal.h
+	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
+
+src/sql_tr_keywords.o: src/sql_tr_keywords.c include/sql_translator.h src/sql_translator_internal.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
 src/pg_config.o: src/pg_config.c src/pg_config.h
@@ -111,7 +139,6 @@ ifeq ($(UNAME_S),Darwin)
 	@pkill -f "Plex Media Server" 2>/dev/null || true
 	@sleep 2
 	@DYLD_INSERT_LIBRARIES="$(CURDIR)/$(TARGET)" \
-		DYLD_PRINT_INTERPOSING=1 \
 		PLEX_PG_HOST=$${PLEX_PG_HOST:-localhost} \
 		PLEX_PG_PORT=$${PLEX_PG_PORT:-5432} \
 		PLEX_PG_DATABASE=$${PLEX_PG_DATABASE:-plex} \

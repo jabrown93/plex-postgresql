@@ -14,13 +14,18 @@ void pg_client_init(void) {
 
 void pg_register_connection(sqlite3 *handle, pg_connection_t *conn) {
     pthread_mutex_lock(&registry_mutex);
+    int registered = 0;
     for (int i = 0; i < MAX_CONNECTIONS; i++) {
         if (connections[i] == NULL) {
             conn->sqlite_handle = handle;
             connections[i] = conn;
             LOG_DEBUG("Registered connection %p for handle %p", (void*)conn, (void*)handle);
+            registered = 1;
             break;
         }
+    }
+    if (!registered) {
+        LOG_ERROR("CRITICAL: Connection registry FULL (MAX_CONNECTIONS=%d)", MAX_CONNECTIONS);
     }
     pthread_mutex_unlock(&registry_mutex);
 }

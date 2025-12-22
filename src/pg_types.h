@@ -5,7 +5,7 @@
 #include <libpq-fe.h>
 #include <pthread.h>
 
-#define MAX_CONNECTIONS 16
+#define MAX_CONNECTIONS 512
 #define MAX_PARAMS 64
 #define MAX_CACHED_STMTS_PER_THREAD 64
 #define PG_VALUE_MAGIC 0x50475641  // "PGVA"
