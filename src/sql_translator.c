@@ -1799,6 +1799,24 @@ char* sql_translate_keywords(const char *sql) {
     temp = str_replace(current, " IN ()", " IN (NULL)");
     free(current);
     current = temp;
+    // Also handle IN with only whitespace: IN (   ) -> IN (NULL)
+    temp = str_replace(current, " IN (  )", " IN (NULL)");
+    free(current);
+    current = temp;
+    temp = str_replace(current, " IN ( )", " IN (NULL)");
+    free(current);
+    current = temp;
+
+    // Fix GROUP BY NULL (SQLite allows, PostgreSQL doesn't)
+    temp = str_replace_nocase(current, " GROUP BY NULL", "");
+    free(current);
+    current = temp;
+
+    // Fix HAVING with aliases (SQLite allows column aliases in HAVING, PostgreSQL doesn't)
+    // Specific fix for common Plex pattern: HAVING cnt = 0 -> HAVING count(media_items.id) = 0
+    temp = str_replace_nocase(current, " HAVING cnt = 0", " HAVING count(media_items.id) = 0");
+    free(current);
+    current = temp;
 
     // Translate sqlite_master to PostgreSQL equivalent
     // SQLite's sqlite_master contains: type, name, tbl_name, rootpage, sql

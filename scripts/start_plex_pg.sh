@@ -1,7 +1,7 @@
 #!/bin/bash
 # Start Plex with PostgreSQL shim
 
-export DYLD_INSERT_LIBRARIES=/Users/sander/plex-scanner-shim/db_interpose_pg.dylib
+export DYLD_INSERT_LIBRARIES=/Users/sander/plex-postgresql/db_interpose_pg.dylib
 export PLEX_PG_HOST=localhost
 export PLEX_PG_PORT=5432
 export PLEX_PG_DATABASE=plex_test
