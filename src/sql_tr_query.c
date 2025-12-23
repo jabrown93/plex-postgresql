@@ -858,20 +858,21 @@ char* fix_collections_query(const char *sql) {
     }
 
     // For the pure collections query (only type=18, no type=1), return empty result
-    if (has_type18 && !has_type1) {
-        LOG_INFO("COLLECTIONS_FIX: Found pure collections query, adding FALSE");
-        // Add 1=0 condition to make it return 0 rows
-        char *temp = str_replace_nocase(result,
-            "metadata_type=18",
-            "metadata_type=18 AND 1=0");
-        if (temp) {
-            LOG_INFO("COLLECTIONS_FIX: Result: %.100s", temp);
-            free(result);
-            result = temp;
-        } else {
-            LOG_ERROR("COLLECTIONS_FIX: str_replace_nocase failed!");
-        }
-    }
+    // NOTE: Disabled - sqlite3_value fix should handle collections now
+    // if (has_type18 && !has_type1) {
+    //     LOG_INFO("COLLECTIONS_FIX: Found pure collections query, adding FALSE");
+    //     // Add 1=0 condition to make it return 0 rows
+    //     char *temp = str_replace_nocase(result,
+    //         "metadata_type=18",
+    //         "metadata_type=18 AND 1=0");
+    //     if (temp) {
+    //         LOG_INFO("COLLECTIONS_FIX: Result: %.100s", temp);
+    //         free(result);
+    //         result = temp;
+    //     } else {
+    //         LOG_ERROR("COLLECTIONS_FIX: str_replace_nocase failed!");
+    //     }
+    // }
 
     return result;
 }
