@@ -3,6 +3,8 @@
 
 UNAME_S := $(shell uname -s)
 
+PLEX_BIN ?= /Applications/Plex Media Server.app/Contents/MacOS/Plex Media Server
+
 # Compiler settings
 ifeq ($(UNAME_S),Darwin)
     # macOS with Homebrew PostgreSQL
@@ -32,8 +34,11 @@ SQL_TR_OBJS = src/sql_translator.o src/sql_tr_helpers.o src/sql_tr_placeholders.
               src/sql_tr_functions.o src/sql_tr_query.o src/sql_tr_types.o \
               src/sql_tr_quotes.o src/sql_tr_keywords.o
 
+# PG modules
+PG_MODULES = src/pg_config.o src/pg_logging.o src/pg_client.o src/pg_statement.o
+
 # All objects
-OBJECTS = $(SQL_TR_OBJS) src/pg_config.o src/pg_logging.o src/pg_client.o src/pg_statement.o src/fishhook.o
+OBJECTS = $(SQL_TR_OBJS) $(PG_MODULES) src/fishhook.o
 
 .PHONY: all clean install test macos linux run stop
 
@@ -80,16 +85,16 @@ src/sql_tr_quotes.o: src/sql_tr_quotes.c src/sql_translator_internal.h
 src/sql_tr_keywords.o: src/sql_tr_keywords.c include/sql_translator.h src/sql_translator_internal.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
-src/pg_config.o: src/pg_config.c src/pg_config.h
+src/pg_config.o: src/pg_config.c src/pg_config.h src/pg_types.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
-src/pg_logging.o: src/pg_logging.c src/pg_logging.h
+src/pg_logging.o: src/pg_logging.c src/pg_logging.h src/pg_types.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
-src/pg_client.o: src/pg_client.c src/pg_client.h
+src/pg_client.o: src/pg_client.c src/pg_client.h src/pg_types.h src/pg_logging.h src/pg_config.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
-src/pg_statement.o: src/pg_statement.c src/pg_statement.h
+src/pg_statement.o: src/pg_statement.c src/pg_statement.h src/pg_types.h src/pg_logging.h src/pg_client.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
 src/fishhook.o: src/fishhook.c include/fishhook.h
@@ -97,7 +102,7 @@ src/fishhook.o: src/fishhook.c include/fishhook.h
 
 # Clean build artifacts
 clean:
-	rm -f db_interpose_pg.dylib db_interpose_pg.so $(OBJECTS)
+	rm -f db_interpose_pg.dylib db_interpose_pg.so $(OBJECTS) $(PG_MODULES)
 
 # Install to system location
 install: $(TARGET)
@@ -138,15 +143,17 @@ ifeq ($(UNAME_S),Darwin)
 	@echo "Starting Plex Media Server with PostgreSQL shim..."
 	@pkill -f "Plex Media Server" 2>/dev/null || true
 	@sleep 2
-	@DYLD_INSERT_LIBRARIES="$(CURDIR)/$(TARGET)" \
-		PLEX_PG_HOST=$${PLEX_PG_HOST:-localhost} \
-		PLEX_PG_PORT=$${PLEX_PG_PORT:-5432} \
-		PLEX_PG_DATABASE=$${PLEX_PG_DATABASE:-plex} \
-		PLEX_PG_USER=$${PLEX_PG_USER:-plex} \
-		PLEX_PG_PASSWORD=$${PLEX_PG_PASSWORD:-plex} \
-		PLEX_PG_SCHEMA=$${PLEX_PG_SCHEMA:-plex} \
-		"/Applications/Plex Media Server.app/Contents/MacOS/Plex Media Server" &
-	@echo "Plex started. Log: /tmp/plex_redirect_pg.log"
+	@DYLD_INSERT_LIBRARIES="$(CURDIR)/db_interpose_pg.dylib" \
+	PLEX_PG_HOST=$${PLEX_PG_HOST:-localhost} \
+	PLEX_PG_PORT=$${PLEX_PG_PORT:-5432} \
+	PLEX_PG_DATABASE=$${PLEX_PG_DATABASE:-plex} \
+	PLEX_PG_USER=$${PLEX_PG_USER:-plex} \
+	PLEX_PG_PASSWORD=$${PLEX_PG_PASSWORD:-plex} \
+	PLEX_PG_SCHEMA=$${PLEX_PG_SCHEMA:-plex} \
+	ENV_PG_LOG_LEVEL=$${ENV_PG_LOG_LEVEL:-DEBUG} \
+	ENV_PG_LOG_FILE=$${ENV_PG_LOG_FILE:-/tmp/plex_redirect_pg.log} \
+	"$(PLEX_BIN)" >> $${ENV_PG_LOG_FILE:-/tmp/plex_redirect_pg.log} 2>&1 &
+	@echo "Plex started. Log: $(ENV_PG_LOG_FILE)"
 else
 	@echo "Run target only supported on macOS"
 endif

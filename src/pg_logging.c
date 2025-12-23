@@ -1,31 +1,44 @@
+/*
+ * PostgreSQL Shim - Logging Module
+ * Thread-safe logging with configurable levels
+ */
+
 #include "pg_logging.h"
+#include "pg_types.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 #include <pthread.h>
 
-#define DEFAULT_LOG_FILE "/tmp/plex_redirect_pg.log"
+// ============================================================================
+// Static State
+// ============================================================================
 
 static FILE *log_file = NULL;
 static pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
-static int current_log_level = PG_LOG_INFO; // Default to INFO
+static int current_log_level = PG_LOG_INFO;
 static int logging_initialized = 0;
 
-void init_logging(void) {
+// ============================================================================
+// Initialization
+// ============================================================================
+
+void pg_logging_init(void) {
     if (logging_initialized) return;
-    
-    // Log Level
-    const char *level_env = getenv("PLEX_PG_LOG_LEVEL");
+
+    // Log Level from environment
+    const char *level_env = getenv(ENV_PG_LOG_LEVEL);
     if (level_env) {
         if (strcasecmp(level_env, "DEBUG") == 0) current_log_level = PG_LOG_DEBUG;
         else if (strcasecmp(level_env, "ERROR") == 0) current_log_level = PG_LOG_ERROR;
         else current_log_level = PG_LOG_INFO;
     }
 
-    // Log File
-    const char *file_env = getenv("PLEX_PG_LOG_FILE");
+    // Log File from environment
+    const char *file_env = getenv(ENV_PG_LOG_FILE);
     if (file_env) {
         if (strcasecmp(file_env, "stdout") == 0) {
             log_file = stdout;
@@ -35,53 +48,115 @@ void init_logging(void) {
             log_file = fopen(file_env, "a");
         }
     } else {
-        log_file = fopen(DEFAULT_LOG_FILE, "a");
+        log_file = fopen(LOG_FILE, "a");
     }
 
-    if (!log_file && log_file != stdout && log_file != stderr) {
-        // Fallback to stderr if file opening fails
+    if (!log_file) {
         log_file = stderr;
         fprintf(stderr, "[PG_SHIM] Failed to open log file, falling back to stderr\n");
     }
 
+    // Unbuffered for file output
     if (log_file != stdout && log_file != stderr) {
-        setbuf(log_file, NULL); // Unbuffered
+        setbuf(log_file, NULL);
     }
 
     logging_initialized = 1;
     log_message(PG_LOG_INFO, "Logging initialized. Level: %d", current_log_level);
 }
 
+void pg_logging_cleanup(void) {
+    if (log_file && log_file != stdout && log_file != stderr) {
+        fclose(log_file);
+        log_file = NULL;
+    }
+    logging_initialized = 0;
+}
+
+// ============================================================================
+// Core Logging
+// ============================================================================
+
 void log_message(int level, const char *fmt, ...) {
-    if (!logging_initialized) init_logging();
+    if (!logging_initialized) pg_logging_init();
     if (level > current_log_level) return;
+    if (!log_file) return;
 
     pthread_mutex_lock(&log_mutex);
 
     time_t now = time(NULL);
     struct tm *tm = localtime(&now);
-    
+
     // Timestamp
-    if (log_file) {
-        fprintf(log_file, "[%04d-%02d-%02d %02d:%02d:%02d] ",
-                tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
-                tm->tm_hour, tm->tm_min, tm->tm_sec);
+    fprintf(log_file, "[%04d-%02d-%02d %02d:%02d:%02d] ",
+            tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
+            tm->tm_hour, tm->tm_min, tm->tm_sec);
 
-        // Level tag
-        switch(level) {
-            case PG_LOG_ERROR: fprintf(log_file, "[ERROR] "); break;
-            case PG_LOG_INFO:  fprintf(log_file, "[INFO] "); break;
-            case PG_LOG_DEBUG: fprintf(log_file, "[DEBUG] "); break;
-        }
-
-        va_list args;
-        va_start(args, fmt);
-        vfprintf(log_file, fmt, args);
-        va_end(args);
-
-        fprintf(log_file, "\n");
-        fflush(log_file);
+    // Level tag
+    switch (level) {
+        case PG_LOG_ERROR: fprintf(log_file, "[ERROR] "); break;
+        case PG_LOG_INFO:  fprintf(log_file, "[INFO] "); break;
+        case PG_LOG_DEBUG: fprintf(log_file, "[DEBUG] "); break;
     }
 
+    // Message
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(log_file, fmt, args);
+    va_end(args);
+
+    fprintf(log_file, "\n");
+    fflush(log_file);
+
     pthread_mutex_unlock(&log_mutex);
+}
+
+// ============================================================================
+// SQL Fallback Logging
+// ============================================================================
+
+void log_sql_fallback(const char *original_sql, const char *translated_sql,
+                      const char *error_msg, const char *context) {
+    // Log to main log
+    log_message(PG_LOG_INFO, "=== SQL FALLBACK TO SQLITE ===");
+    log_message(PG_LOG_INFO, "Context: %s", context);
+    log_message(PG_LOG_INFO, "Original SQL: %.500s", original_sql);
+    if (translated_sql) {
+        log_message(PG_LOG_INFO, "Translated SQL: %.500s", translated_sql);
+    }
+    log_message(PG_LOG_INFO, "PostgreSQL Error: %s", error_msg);
+    log_message(PG_LOG_INFO, "=== END FALLBACK ===");
+
+    // Also log to separate fallback analysis file
+    FILE *fallback_log = fopen(FALLBACK_LOG_FILE, "a");
+    if (fallback_log) {
+        time_t now = time(NULL);
+        char timestamp[64];
+        strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", localtime(&now));
+
+        fprintf(fallback_log, "\n[%s] %s\n", timestamp, context);
+        fprintf(fallback_log, "ORIGINAL: %s\n", original_sql);
+        if (translated_sql) {
+            fprintf(fallback_log, "TRANSLATED: %s\n", translated_sql);
+        }
+        fprintf(fallback_log, "ERROR: %s\n", error_msg);
+        fprintf(fallback_log, "---\n");
+        fclose(fallback_log);
+    }
+}
+
+// ============================================================================
+// Error Classification
+// ============================================================================
+
+int is_known_translation_limitation(const char *error_msg) {
+    if (!error_msg) return 0;
+
+    // Known translation limitations (logged for improvement)
+    if (strstr(error_msg, "operator does not exist: integer = json")) return 1;
+    if (strstr(error_msg, "must appear in the GROUP BY clause")) return 1;
+    if (strstr(error_msg, "syntax error")) return 1;
+    if (strstr(error_msg, "no unique or exclusion constraint matching the ON CONFLICT")) return 1;
+
+    return 0;
 }

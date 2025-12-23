@@ -1,23 +1,33 @@
+/*
+ * PostgreSQL Shim - Configuration Module
+ * Configuration loading and SQL classification
+ */
+
 #include "pg_config.h"
 #include "pg_logging.h"
 #include <stdlib.h>
 #include <string.h>
-#include <stdio.h>
-#include <strings.h> // for strncasecmp, strcasestr
+#include <strings.h>
+#include <ctype.h>
+
+// ============================================================================
+// Static State
+// ============================================================================
 
 static pg_conn_config_t pg_config;
 static int config_loaded = 0;
 
+// Database files to redirect to PostgreSQL
 static const char *REDIRECT_PATTERNS[] = {
     "com.plexapp.plugins.library.db",
     "com.plexapp.plugins.library.blobs.db",
     NULL
 };
 
-// SQLite-specific commands that should be SKIPPED entirely (no-op, return success)
+// SQLite-specific commands to skip (no-op, return success)
 static const char *SQLITE_SKIP_PATTERNS[] = {
     "icu_load_collation",
-    "fts3_tokenizer",    // SQLite FTS3 tokenizer setup
+    "fts3_tokenizer",
     "SELECT load_extension",
     "VACUUM",
     "PRAGMA",
@@ -25,21 +35,31 @@ static const char *SQLITE_SKIP_PATTERNS[] = {
     "ANALYZE sqlite_",
     "ATTACH DATABASE",
     "DETACH DATABASE",
-    "ROLLBACK",          // Avoid "no transaction in progress" warnings if we manage trans differently
+    "ROLLBACK",
     "SAVEPOINT",
     "RELEASE SAVEPOINT",
-    "sqlite_schema",     // SQLite internal schema table
-    "sqlite_master",     // SQLite internal master table (alias for sqlite_schema)
-    "typeof(",           // SQLite typeof() function (used in schema migrations) - handled by translator? 
-                         // Check: The original code skipped it here, so we keep it. 
-                         // But wait, typeof() is translated in sql_translator.c. 
-                         // If it's a "SELECT typeof(...)" query it might be skipped?
-                         // The original code had "typeof(" in SKIP_PATTERNS.
-    "last_insert_rowid()", // SQLite-specific function
     NULL
 };
 
-void load_config(void) {
+// Patterns that can appear anywhere in SQL (should skip)
+static const char *ANYWHERE_SKIP_PATTERNS[] = {
+    "sqlite_schema",
+    "sqlite_master",
+    "fts3_tokenizer",
+    // "fts4",  -- Enable FTS translation
+    // "fts5",  -- Enable FTS translation
+    "spellfix",
+    "icu_load_collation",
+    "typeof(",
+    "last_insert_rowid()",
+    NULL
+};
+
+// ============================================================================
+// Configuration Loading
+// ============================================================================
+
+void pg_config_init(void) {
     if (config_loaded) return;
 
     const char *val;
@@ -65,14 +85,18 @@ void load_config(void) {
     config_loaded = 1;
 
     LOG_INFO("PostgreSQL config: %s@%s:%d/%s (schema: %s)",
-                pg_config.user, pg_config.host, pg_config.port,
-                pg_config.database, pg_config.schema);
+             pg_config.user, pg_config.host, pg_config.port,
+             pg_config.database, pg_config.schema);
 }
 
-pg_conn_config_t* get_config(void) {
-    if (!config_loaded) load_config();
+pg_conn_config_t* pg_config_get(void) {
+    if (!config_loaded) pg_config_init();
     return &pg_config;
 }
+
+// ============================================================================
+// SQL Classification
+// ============================================================================
 
 int should_redirect(const char *filename) {
     if (!filename) return 0;
@@ -91,28 +115,44 @@ int should_skip_sql(const char *sql) {
     // Skip whitespace at start
     while (*sql && (*sql == ' ' || *sql == '\t' || *sql == '\n')) sql++;
 
-    // Check patterns that should only match at start of SQL
+    // Check patterns that should match at start of SQL
     for (int i = 0; SQLITE_SKIP_PATTERNS[i]; i++) {
         if (strncasecmp(sql, SQLITE_SKIP_PATTERNS[i], strlen(SQLITE_SKIP_PATTERNS[i])) == 0) {
             return 1;
         }
     }
 
-    // Patterns that can appear anywhere in SQL
-    static const char *ANYWHERE_PATTERNS[] = {
-        "sqlite_schema",
-        "sqlite_master",
-        "fts3_tokenizer",
-        "fts4",
-        "fts5",
-        "spellfix",
-        "icu_load_collation",
-        NULL
-    };
-    for (int i = 0; ANYWHERE_PATTERNS[i]; i++) {
-        if (strcasestr(sql, ANYWHERE_PATTERNS[i])) {
+    // Check patterns that can appear anywhere
+    for (int i = 0; ANYWHERE_SKIP_PATTERNS[i]; i++) {
+        if (strcasestr(sql, ANYWHERE_SKIP_PATTERNS[i])) {
             return 1;
         }
     }
+
+    return 0;
+}
+
+int is_write_operation(const char *sql) {
+    if (!sql) return 0;
+
+    // Skip whitespace
+    while (*sql && isspace(*sql)) sql++;
+
+    if (strncasecmp(sql, "INSERT", 6) == 0) return 1;
+    if (strncasecmp(sql, "UPDATE", 6) == 0) return 1;
+    if (strncasecmp(sql, "DELETE", 6) == 0) return 1;
+    if (strncasecmp(sql, "REPLACE", 7) == 0) return 1;
+
+    return 0;
+}
+
+int is_read_operation(const char *sql) {
+    if (!sql) return 0;
+
+    // Skip whitespace
+    while (*sql && isspace(*sql)) sql++;
+
+    if (strncasecmp(sql, "SELECT", 6) == 0) return 1;
+
     return 0;
 }

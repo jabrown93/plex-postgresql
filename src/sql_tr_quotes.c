@@ -293,3 +293,117 @@ char* add_if_not_exists(const char *sql) {
 
     return strdup(sql);
 }
+
+// ============================================================================
+// Fix ON CONFLICT quotes: ON CONFLICT("name") -> ON CONFLICT(name)
+// PostgreSQL requires unquoted column names in ON CONFLICT clause
+// ============================================================================
+
+char* fix_on_conflict_quotes(const char *sql) {
+    if (!sql) return NULL;
+
+    // Quick check if there's even an ON CONFLICT clause
+    const char *on_conflict = strcasestr(sql, "ON CONFLICT");
+    if (!on_conflict) {
+        return strdup(sql);
+    }
+
+    char *result = malloc(strlen(sql) + 1);
+    if (!result) return NULL;
+
+    char *out = result;
+    const char *p = sql;
+    int in_string = 0;
+    char string_char = 0;
+    int inside_on_conflict_parens = 0;
+    int paren_depth = 0;
+
+    while (*p) {
+        // Track ON CONFLICT clause start
+        if (!in_string && !inside_on_conflict_parens) {
+            if (strncasecmp(p, "ON CONFLICT", 11) == 0) {
+                // Copy "ON CONFLICT"
+                memcpy(out, p, 11);
+                out += 11;
+                p += 11;
+
+                // Skip whitespace
+                while (*p && (*p == ' ' || *p == '\t' || *p == '\n')) {
+                    *out++ = *p++;
+                }
+
+                // Check if opening paren follows
+                if (*p == '(') {
+                    *out++ = *p++;
+                    inside_on_conflict_parens = 1;
+                    paren_depth = 1;
+                }
+                continue;
+            }
+        }
+
+        // Inside ON CONFLICT parentheses
+        if (inside_on_conflict_parens && !in_string) {
+            // Track paren depth
+            if (*p == '(') {
+                paren_depth++;
+                *out++ = *p++;
+                continue;
+            } else if (*p == ')') {
+                paren_depth--;
+                *out++ = *p++;
+                if (paren_depth == 0) {
+                    inside_on_conflict_parens = 0;
+                }
+                continue;
+            }
+
+            // Remove quotes around identifiers
+            if (*p == '"') {
+                // Skip the opening quote
+                p++;
+                // Copy the identifier without quotes
+                while (*p && *p != '"') {
+                    *out++ = *p++;
+                }
+                // Skip the closing quote
+                if (*p == '"') p++;
+                continue;
+            }
+        }
+
+        // Track string literals (single quotes)
+        if (*p == '\'' && (p == sql || *(p-1) != '\\')) {
+            if (!in_string) {
+                in_string = 1;
+                string_char = '\'';
+            } else if (string_char == '\'') {
+                // Check for escaped quotes
+                if (*(p+1) == '\'') {
+                    *out++ = *p++;
+                    *out++ = *p++;
+                    continue;
+                }
+                in_string = 0;
+            }
+        }
+
+        *out++ = *p++;
+    }
+
+    *out = '\0';
+    return result;
+}
+
+// ============================================================================
+// Fix duplicate column assignments in UPDATE statements
+// UPDATE table SET col=1, col=2 -> Keep only the last assignment
+// ============================================================================
+
+char* fix_duplicate_assignments(const char *sql) {
+    if (!sql) return NULL;
+
+    // For now, just return a copy
+    // This function can be implemented later if needed
+    return strdup(sql);
+}

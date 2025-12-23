@@ -1,3 +1,8 @@
+/*
+ * PostgreSQL Shim - Logging Module
+ * Thread-safe logging with configurable levels
+ */
+
 #ifndef PG_LOGGING_H
 #define PG_LOGGING_H
 
@@ -8,12 +13,25 @@ typedef enum {
     PG_LOG_DEBUG = 2
 } pg_log_level_t;
 
-void init_logging(void);
+// Initialize logging (called automatically on first log)
+void pg_logging_init(void);
+
+// Cleanup logging
+void pg_logging_cleanup(void);
+
+// Core logging function
 void log_message(int level, const char *fmt, ...);
 
-// Legacy/Compatibility macro - defaults to INFO
-#define LOG_INFO(fmt, ...) log_message(PG_LOG_INFO, fmt, ##__VA_ARGS__)
+// Log SQL fallback for analysis
+void log_sql_fallback(const char *original_sql, const char *translated_sql,
+                      const char *error_msg, const char *context);
+
+// Check if error is a known translation limitation
+int is_known_translation_limitation(const char *error_msg);
+
+// Convenience macros
 #define LOG_ERROR(fmt, ...) log_message(PG_LOG_ERROR, fmt, ##__VA_ARGS__)
+#define LOG_INFO(fmt, ...)  log_message(PG_LOG_INFO, fmt, ##__VA_ARGS__)
 #define LOG_DEBUG(fmt, ...) log_message(PG_LOG_DEBUG, fmt, ##__VA_ARGS__)
 
 #endif // PG_LOGGING_H

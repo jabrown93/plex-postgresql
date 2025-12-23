@@ -161,17 +161,20 @@ char* sql_translate_keywords(const char *sql) {
     free(current);
     current = temp;
 
-    // Fix empty IN clause
-    temp = str_replace(current, " in ()", " IN (NULL)");
+    // Fix empty IN clause - use empty subquery that returns no rows
+    // IN () in SQLite returns 0 rows (empty set), PostgreSQL rejects the syntax
+    // Use integer literal -1 instead of NULL to avoid type inference issues
+    // (-1 will never match any positive ID, and the WHERE FALSE ensures no rows)
+    temp = str_replace(current, " in ()", " IN (SELECT -1 WHERE FALSE)");
     free(current);
     current = temp;
-    temp = str_replace(current, " IN ()", " IN (NULL)");
+    temp = str_replace(current, " IN ()", " IN (SELECT -1 WHERE FALSE)");
     free(current);
     current = temp;
-    temp = str_replace(current, " IN (  )", " IN (NULL)");
+    temp = str_replace(current, " IN (  )", " IN (SELECT -1 WHERE FALSE)");
     free(current);
     current = temp;
-    temp = str_replace(current, " IN ( )", " IN (NULL)");
+    temp = str_replace(current, " IN ( )", " IN (SELECT -1 WHERE FALSE)");
     free(current);
     current = temp;
 

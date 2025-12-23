@@ -51,6 +51,12 @@ char* translate_min_to_least(const char *sql);
 char* translate_fts(const char *sql);
 char* fix_forward_reference_joins(const char *sql);
 char* translate_distinct_orderby(const char *sql);
+char* translate_null_sorting(const char *sql);
+char* fix_integer_text_mismatch(const char *sql);
+char* fix_duplicate_assignments(const char *sql);
+char* strip_icu_collation(const char *sql);
+char* fix_json_operator_on_text(const char *sql);
+char* fix_collections_query(const char *sql);
 
 // ============================================================================
 // Quote Translations (sql_tr_quotes.c)
@@ -61,6 +67,7 @@ char* translate_column_quotes(const char *sql);
 char* translate_alias_quotes(const char *sql);
 char* translate_ddl_quotes(const char *sql);
 char* add_if_not_exists(const char *sql);
+char* fix_on_conflict_quotes(const char *sql);
 
 // ============================================================================
 // Keyword Translations (sql_tr_keywords.c)
