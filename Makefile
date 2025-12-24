@@ -49,8 +49,8 @@ $(TARGET): $(SOURCE) $(OBJECTS)
 	$(CC) $(SHARED_FLAGS) -o $@ $< $(OBJECTS) $(CFLAGS) $(LDFLAGS)
 
 # Explicit macOS build - use dynamic_lookup instead of linking sqlite3
-macos: src/db_interpose_pg.c src/fishhook.c $(OBJECTS)
-	clang -dynamiclib -flat_namespace -undefined dynamic_lookup -o db_interpose_pg.dylib $< src/fishhook.c $(OBJECTS) \
+macos: src/db_interpose_pg.c $(OBJECTS)
+	clang -dynamiclib -flat_namespace -undefined dynamic_lookup -o db_interpose_pg.dylib $< $(OBJECTS) \
 		-I/opt/homebrew/opt/postgresql@15/include -Iinclude -Isrc \
 		-L/opt/homebrew/opt/postgresql@15/lib -lpq
 
@@ -150,6 +150,7 @@ ifeq ($(UNAME_S),Darwin)
 	@pkill -f "Plex Media Server" 2>/dev/null || true
 	@sleep 2
 	@DYLD_INSERT_LIBRARIES="$(CURDIR)/db_interpose_pg.dylib" \
+	PLEX_NO_SHADOW_SCAN=1 \
 	PLEX_PG_HOST=$${PLEX_PG_HOST:-localhost} \
 	PLEX_PG_PORT=$${PLEX_PG_PORT:-5432} \
 	PLEX_PG_DATABASE=$${PLEX_PG_DATABASE:-plex} \

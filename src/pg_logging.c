@@ -20,15 +20,14 @@
 static FILE *log_file = NULL;
 static pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int current_log_level = PG_LOG_INFO;
-static int logging_initialized = 0;
+static volatile int logging_initialized = 0;
+static pthread_once_t logging_init_once = PTHREAD_ONCE_INIT;
 
 // ============================================================================
 // Initialization
 // ============================================================================
 
-void pg_logging_init(void) {
-    if (logging_initialized) return;
-
+static void do_logging_init(void) {
     // Log Level from environment
     const char *level_env = getenv(ENV_PG_LOG_LEVEL);
     if (level_env) {
@@ -62,7 +61,16 @@ void pg_logging_init(void) {
     }
 
     logging_initialized = 1;
-    log_message(PG_LOG_INFO, "Logging initialized. Level: %d", current_log_level);
+}
+
+void pg_logging_init(void) {
+    pthread_once(&logging_init_once, do_logging_init);
+    // Log after init is complete (can't call from do_logging_init due to recursion)
+    static volatile int first_log_done = 0;
+    if (!first_log_done) {
+        first_log_done = 1;
+        log_message(PG_LOG_INFO, "Logging initialized. Level: %d", current_log_level);
+    }
 }
 
 void pg_logging_cleanup(void) {

@@ -17,18 +17,30 @@
 // Static State
 // ============================================================================
 
-// Statement registry
-typedef struct {
+// Statement registry with hash table for O(1) lookup
+typedef struct stmt_entry {
     sqlite3_stmt *sqlite_stmt;
     pg_stmt_t *pg_stmt;
+    struct stmt_entry *next;  // For hash collision chaining
 } stmt_entry_t;
 
-static stmt_entry_t stmt_map[MAX_STATEMENTS];
+#define HASH_BUCKETS 256  // Power of 2 for fast modulo
+
+static stmt_entry_t *stmt_hash[HASH_BUCKETS];  // Hash table buckets
+static stmt_entry_t stmt_pool[MAX_STATEMENTS]; // Pre-allocated entries
+static int stmt_pool_next = 0;
 static pthread_mutex_t stmt_map_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// Simple hash function for pointers
+static inline unsigned int hash_ptr(void *ptr) {
+    uintptr_t p = (uintptr_t)ptr;
+    return (unsigned int)((p >> 4) ^ (p >> 12)) & (HASH_BUCKETS - 1);
+}
 
 // TLS key for cached statements
 static pthread_key_t cached_stmts_key;
 static pthread_once_t cached_stmts_key_once = PTHREAD_ONCE_INIT;
+static volatile int cached_stmts_key_valid = 0;
 
 // Fake sqlite3_value pool
 #define MAX_PG_VALUES 4096
@@ -36,7 +48,8 @@ static pg_value_t pg_values[MAX_PG_VALUES];
 static int pg_value_idx = 0;
 static pthread_mutex_t pg_value_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-static int statement_initialized = 0;
+static volatile int statement_initialized = 0;
+static pthread_once_t statement_init_once = PTHREAD_ONCE_INIT;
 
 // ============================================================================
 // TLS Setup
@@ -56,11 +69,23 @@ static void free_thread_cached_stmts(void *ptr) {
 }
 
 static void create_cached_stmts_key(void) {
-    pthread_key_create(&cached_stmts_key, free_thread_cached_stmts);
+    int rc = pthread_key_create(&cached_stmts_key, free_thread_cached_stmts);
+    if (rc != 0) {
+        LOG_ERROR("pthread_key_create failed with error %d", rc);
+        cached_stmts_key_valid = 0;
+    } else {
+        cached_stmts_key_valid = 1;
+    }
 }
 
 static thread_cached_stmts_t* get_thread_cached_stmts(void) {
     pthread_once(&cached_stmts_key_once, create_cached_stmts_key);
+
+    // Check if key creation was successful
+    if (!cached_stmts_key_valid) {
+        return NULL;
+    }
+
     thread_cached_stmts_t *tcs = pthread_getspecific(cached_stmts_key);
     if (!tcs) {
         tcs = calloc(1, sizeof(thread_cached_stmts_t));
@@ -75,57 +100,81 @@ static thread_cached_stmts_t* get_thread_cached_stmts(void) {
 // Initialization
 // ============================================================================
 
-void pg_statement_init(void) {
-    if (statement_initialized) return;
-    memset(stmt_map, 0, sizeof(stmt_map));
+static void do_statement_init(void) {
+    memset(stmt_hash, 0, sizeof(stmt_hash));
+    memset(stmt_pool, 0, sizeof(stmt_pool));
+    stmt_pool_next = 0;
     statement_initialized = 1;
-    LOG_DEBUG("pg_statement initialized");
+    LOG_DEBUG("pg_statement initialized with hash table");
+}
+
+void pg_statement_init(void) {
+    pthread_once(&statement_init_once, do_statement_init);
 }
 
 void pg_statement_cleanup(void) {
     pthread_mutex_lock(&stmt_map_mutex);
-    for (int i = 0; i < MAX_STATEMENTS; i++) {
-        if (stmt_map[i].pg_stmt) {
-            pg_stmt_free(stmt_map[i].pg_stmt);
-            stmt_map[i].pg_stmt = NULL;
-            stmt_map[i].sqlite_stmt = NULL;
+    for (int i = 0; i < stmt_pool_next; i++) {
+        if (stmt_pool[i].pg_stmt) {
+            pg_stmt_free(stmt_pool[i].pg_stmt);
         }
     }
+    memset(stmt_hash, 0, sizeof(stmt_hash));
+    memset(stmt_pool, 0, sizeof(stmt_pool));
+    stmt_pool_next = 0;
     pthread_mutex_unlock(&stmt_map_mutex);
     statement_initialized = 0;
 }
 
 // ============================================================================
-// Statement Registry
+// Statement Registry (Hash Table)
 // ============================================================================
 
 void pg_register_stmt(sqlite3_stmt *sqlite_stmt, pg_stmt_t *pg_stmt) {
     if (!sqlite_stmt || !pg_stmt) return;
 
     pthread_mutex_lock(&stmt_map_mutex);
-    for (int i = 0; i < MAX_STATEMENTS; i++) {
-        if (stmt_map[i].sqlite_stmt == NULL) {
-            stmt_map[i].sqlite_stmt = sqlite_stmt;
-            stmt_map[i].pg_stmt = pg_stmt;
-            pthread_mutex_unlock(&stmt_map_mutex);
-            return;
-        }
+
+    // Get a free entry from the pool
+    if (stmt_pool_next >= MAX_STATEMENTS) {
+        pthread_mutex_unlock(&stmt_map_mutex);
+        LOG_ERROR("Statement pool full! MAX_STATEMENTS=%d", MAX_STATEMENTS);
+        return;
     }
+
+    stmt_entry_t *entry = &stmt_pool[stmt_pool_next++];
+    entry->sqlite_stmt = sqlite_stmt;
+    entry->pg_stmt = pg_stmt;
+
+    // Insert into hash bucket
+    unsigned int bucket = hash_ptr(sqlite_stmt);
+    entry->next = stmt_hash[bucket];
+    stmt_hash[bucket] = entry;
+
     pthread_mutex_unlock(&stmt_map_mutex);
-    LOG_ERROR("Statement registry full! MAX_STATEMENTS=%d", MAX_STATEMENTS);
 }
 
 void pg_unregister_stmt(sqlite3_stmt *sqlite_stmt) {
     if (!sqlite_stmt) return;
 
     pthread_mutex_lock(&stmt_map_mutex);
-    for (int i = 0; i < MAX_STATEMENTS; i++) {
-        if (stmt_map[i].sqlite_stmt == sqlite_stmt) {
-            stmt_map[i].sqlite_stmt = NULL;
-            stmt_map[i].pg_stmt = NULL;
+
+    unsigned int bucket = hash_ptr(sqlite_stmt);
+    stmt_entry_t **prev = &stmt_hash[bucket];
+    stmt_entry_t *entry = stmt_hash[bucket];
+
+    while (entry) {
+        if (entry->sqlite_stmt == sqlite_stmt) {
+            // Remove from hash chain (mark as deleted, don't actually remove from pool)
+            *prev = entry->next;
+            entry->sqlite_stmt = NULL;
+            entry->pg_stmt = NULL;
             break;
         }
+        prev = &entry->next;
+        entry = entry->next;
     }
+
     pthread_mutex_unlock(&stmt_map_mutex);
 }
 
@@ -133,19 +182,25 @@ pg_stmt_t* pg_find_stmt(sqlite3_stmt *stmt) {
     if (!stmt) return NULL;
 
     pthread_mutex_lock(&stmt_map_mutex);
-    for (int i = 0; i < MAX_STATEMENTS; i++) {
-        if (stmt_map[i].sqlite_stmt == stmt) {
-            pg_stmt_t *result = stmt_map[i].pg_stmt;
+
+    unsigned int bucket = hash_ptr(stmt);
+    stmt_entry_t *entry = stmt_hash[bucket];
+
+    while (entry) {
+        if (entry->sqlite_stmt == stmt) {
+            pg_stmt_t *result = entry->pg_stmt;
             pthread_mutex_unlock(&stmt_map_mutex);
             return result;
         }
+        entry = entry->next;
     }
+
     pthread_mutex_unlock(&stmt_map_mutex);
     return NULL;
 }
 
 pg_stmt_t* pg_find_any_stmt(sqlite3_stmt *stmt) {
-    // First try direct lookup
+    // First try direct lookup (fast hash lookup)
     pg_stmt_t *pg_stmt = pg_find_stmt(stmt);
     if (pg_stmt) return pg_stmt;
 
@@ -159,9 +214,11 @@ pg_stmt_t* pg_find_any_stmt(sqlite3_stmt *stmt) {
 int pg_is_our_stmt(void *ptr) {
     if (!ptr) return 0;
 
+    // Note: This still needs O(n) scan since we're searching by pg_stmt, not sqlite_stmt
+    // But it's called much less frequently than pg_find_stmt
     pthread_mutex_lock(&stmt_map_mutex);
-    for (int i = 0; i < MAX_STATEMENTS; i++) {
-        if (stmt_map[i].pg_stmt == ptr) {
+    for (int i = 0; i < stmt_pool_next; i++) {
+        if (stmt_pool[i].pg_stmt == ptr) {
             pthread_mutex_unlock(&stmt_map_mutex);
             return 1;
         }
@@ -264,6 +321,14 @@ void pg_stmt_free(pg_stmt_t *stmt) {
 
     for (int i = 0; i < stmt->param_count; i++) {
         if (stmt->param_values[i]) free(stmt->param_values[i]);
+    }
+
+    // Free parameter names (for named parameter mapping)
+    if (stmt->param_names) {
+        for (int i = 0; i < stmt->param_count; i++) {
+            if (stmt->param_names[i]) free(stmt->param_names[i]);
+        }
+        free(stmt->param_names);
     }
 
     // Free decoded blob cache

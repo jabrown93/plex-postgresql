@@ -90,6 +90,7 @@ typedef struct pg_stmt {
     int param_lengths[MAX_PARAMS];
     int param_formats[MAX_PARAMS];   // 0 = text, 1 = binary
     int param_count;
+    char **param_names;              // Named parameter names (for mapping :name to $N)
 
     // Decoded BYTEA blob cache (per-row, freed on step/reset)
     void *decoded_blobs[MAX_PARAMS]; // Decoded binary data per column

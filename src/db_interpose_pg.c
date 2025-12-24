@@ -11,6 +11,7 @@
 #include <pthread.h>
 #include <stdint.h>
 #include <strings.h>
+#include <ctype.h>
 #include <sqlite3.h>
 #include <libpq-fe.h>
 
@@ -49,6 +50,7 @@ typedef struct {
 #define MAX_FAKE_VALUES 256
 static pg_fake_value_t fake_value_pool[MAX_FAKE_VALUES];
 static int fake_value_next = 0;
+static pthread_mutex_t fake_value_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // Check if a pointer is one of our fake values
 static pg_fake_value_t* pg_check_fake_value(sqlite3_value *pVal) {
@@ -102,6 +104,36 @@ static char* simple_str_replace(const char *str, const char *old, const char *ne
 // Interposed SQLite Functions - Open/Close
 // ============================================================================
 
+// Helper to drop indexes that use icu_root collation
+// These indexes cause "no such collation sequence: icu_root" errors
+static void drop_icu_root_indexes(sqlite3 *db) {
+    if (!db) return;
+
+    const char *drop_index_sqls[] = {
+        "DROP INDEX IF EXISTS index_title_sort_icu",
+        "DROP INDEX IF EXISTS index_original_title_icu",
+        NULL
+    };
+
+    int indexes_dropped = 0;
+    char *errmsg = NULL;
+
+    for (int i = 0; drop_index_sqls[i] != NULL; i++) {
+        int rc = sqlite3_exec(db, drop_index_sqls[i], NULL, NULL, &errmsg);
+        if (rc == SQLITE_OK) {
+            indexes_dropped++;
+        } else if (errmsg) {
+            LOG_DEBUG("Failed to drop icu index: %s", errmsg);
+            sqlite3_free(errmsg);
+            errmsg = NULL;
+        }
+    }
+
+    if (indexes_dropped > 0) {
+        LOG_INFO("Dropped %d icu_root indexes to avoid collation errors", indexes_dropped);
+    }
+}
+
 // Helper to drop FTS triggers that use "collating" tokenizer
 // These triggers cause "unknown tokenizer: collating" errors when
 // DELETE/UPDATE on tags or metadata_items fires them
@@ -147,6 +179,8 @@ static int my_sqlite3_open(const char *filename, sqlite3 **ppDb) {
     if (rc == SQLITE_OK && should_redirect(filename)) {
         // Drop FTS triggers to prevent "unknown tokenizer: collating" errors
         drop_fts_triggers(*ppDb);
+        // Drop icu_root indexes to prevent "no such collation sequence" errors
+        drop_icu_root_indexes(*ppDb);
 
         pg_connection_t *pg_conn = pg_connect(filename, *ppDb);
         if (pg_conn) {
@@ -167,6 +201,8 @@ static int my_sqlite3_open_v2(const char *filename, sqlite3 **ppDb, int flags, c
     if (rc == SQLITE_OK && should_redirect(filename)) {
         // Drop FTS triggers to prevent "unknown tokenizer: collating" errors
         drop_fts_triggers(*ppDb);
+        // Drop icu_root indexes to prevent "no such collation sequence" errors
+        drop_icu_root_indexes(*ppDb);
 
         pg_connection_t *pg_conn = pg_connect(filename, *ppDb);
         if (pg_conn) {
@@ -364,6 +400,14 @@ static char* simplify_fts_for_sqlite(const char *sql) {
 
 static int my_sqlite3_prepare_v2(sqlite3 *db, const char *zSql, int nByte,
                                   sqlite3_stmt **ppStmt, const char **pzTail) {
+    // Debug: log INSERT INTO metadata_items
+    if (zSql && strncasecmp(zSql, "INSERT", 6) == 0 && strcasestr(zSql, "metadata_items")) {
+        LOG_INFO("PREPARE_V2 INSERT metadata_items: %.300s", zSql);
+        if (strcasestr(zSql, "icu_root")) {
+            LOG_INFO("PREPARE_V2 has icu_root - will clean!");
+        }
+    }
+
     pg_connection_t *pg_conn = pg_find_connection(db);
     int is_write = is_write_operation(zSql);
     int is_read = is_read_operation(zSql);
@@ -421,6 +465,42 @@ static int my_sqlite3_prepare_v2(sqlite3 *db, const char *zSql, int nByte,
                 if (!trans.success) {
                        LOG_ERROR("Translation failed for SQL: %s. Error: %s", zSql, trans.error);
                 }
+
+                // Use parameter count from SQL translator (already counted during placeholder translation)
+                // The translator always returns param_count even if translation failed
+                if (trans.param_count > 0) {
+                    pg_stmt->param_count = trans.param_count;
+                } else {
+                    // Fallback: count ? in original SQL if translator didn't provide count
+                    const char *p = zSql;
+                    while (*p) {
+                        if (*p == '?') pg_stmt->param_count++;
+                        p++;
+                    }
+                }
+
+                // Store parameter names for mapping named parameters
+                if (trans.param_names && trans.param_count > 0) {
+                    pg_stmt->param_names = malloc(trans.param_count * sizeof(char*));
+                    if (pg_stmt->param_names) {
+                        for (int i = 0; i < trans.param_count; i++) {
+                            pg_stmt->param_names[i] = trans.param_names[i] ? strdup(trans.param_names[i]) : NULL;
+                        }
+                    }
+                    // Debug: log parameter names for metadata_items INSERT
+                    if (strcasestr(zSql, "INSERT") && strcasestr(zSql, "metadata_items")) {
+                        LOG_ERROR("PREPARE INSERT metadata_items: param_count=%d", trans.param_count);
+                        LOG_ERROR("  First 15 params in SQL order:");
+                        for (int i = 0; i < trans.param_count && i < 15; i++) {
+                            LOG_ERROR("    pg_idx[%d] = param_name='%s'", i, trans.param_names[i] ? trans.param_names[i] : "NULL");
+                        }
+                        if (trans.param_count > 15) {
+                            LOG_ERROR("  ... (%d total params)", trans.param_count);
+                        }
+                        LOG_ERROR("  Original SQL (first 500 chars): %.500s", zSql);
+                    }
+                }
+
                 if (trans.success && trans.sql) {
                     pg_stmt->pg_sql = strdup(trans.sql);
 
@@ -442,10 +522,6 @@ static int my_sqlite3_prepare_v2(sqlite3 *db, const char *zSql, int nByte,
                 sql_translation_free(&trans);
             }
 
-            // Count parameters
-            const char *p = zSql;
-            while (*p) { if (*p == '?') pg_stmt->param_count++; p++; }
-
             pg_register_stmt(*ppStmt, pg_stmt);
         }
     }
@@ -456,28 +532,135 @@ static int my_sqlite3_prepare_v2(sqlite3 *db, const char *zSql, int nByte,
 
 static int my_sqlite3_prepare(sqlite3 *db, const char *zSql, int nByte,
                               sqlite3_stmt **ppStmt, const char **pzTail) {
-    return sqlite3_prepare_v2(db, zSql, nByte, ppStmt, pzTail);
+    // Route through my_sqlite3_prepare_v2 to get icu_root cleanup and PG handling
+    return my_sqlite3_prepare_v2(db, zSql, nByte, ppStmt, pzTail);
 }
 
 static int my_sqlite3_prepare16_v2(sqlite3 *db, const void *zSql, int nByte,
                                     sqlite3_stmt **ppStmt, const void **pzTail) {
+    // Convert UTF-16 to UTF-8 for icu_root cleanup
+    // This is rarely used but we need to handle it for completeness
+    if (zSql) {
+        // Get UTF-16 length
+        int utf16_len = 0;
+        if (nByte < 0) {
+            const uint16_t *p = (const uint16_t *)zSql;
+            while (*p) { p++; utf16_len++; }
+            utf16_len *= 2;
+        } else {
+            utf16_len = nByte;
+        }
+
+        // Convert to UTF-8 using a simple approach
+        char *utf8_sql = malloc(utf16_len * 2 + 1);
+        if (utf8_sql) {
+            const uint16_t *src = (const uint16_t *)zSql;
+            char *dst = utf8_sql;
+            int i;
+            for (i = 0; i < utf16_len / 2 && src[i]; i++) {
+                if (src[i] < 0x80) {
+                    *dst++ = (char)src[i];
+                } else if (src[i] < 0x800) {
+                    *dst++ = 0xC0 | (src[i] >> 6);
+                    *dst++ = 0x80 | (src[i] & 0x3F);
+                } else {
+                    *dst++ = 0xE0 | (src[i] >> 12);
+                    *dst++ = 0x80 | ((src[i] >> 6) & 0x3F);
+                    *dst++ = 0x80 | (src[i] & 0x3F);
+                }
+            }
+            *dst = '\0';
+
+            // Check for icu_root and route through UTF-8 handler if found
+            if (strcasestr(utf8_sql, "collate icu_root")) {
+                LOG_INFO("UTF-16 query with icu_root, routing to UTF-8 handler: %.200s", utf8_sql);
+                const char *tail8 = NULL;
+                int rc = my_sqlite3_prepare_v2(db, utf8_sql, -1, ppStmt, &tail8);
+                free(utf8_sql);
+                if (pzTail) *pzTail = NULL;  // Tail not accurate after conversion
+                return rc;
+            }
+            free(utf8_sql);
+        }
+    }
+
     return sqlite3_prepare16_v2(db, zSql, nByte, ppStmt, pzTail);
+}
+
+static int my_sqlite3_prepare_v3(sqlite3 *db, const char *zSql, int nByte,
+                                  unsigned int prepFlags, sqlite3_stmt **ppStmt,
+                                  const char **pzTail) {
+    // Log that prepare_v3 is being used
+    if (zSql && strcasestr(zSql, "metadata_items")) {
+        LOG_INFO("PREPARE_V3 metadata_items query: %.200s", zSql);
+    }
+    // Route through my_sqlite3_prepare_v2 to get icu_root cleanup and PG handling
+    // We ignore prepFlags for now as they're SQLite-specific optimizations
+    (void)prepFlags;
+    return my_sqlite3_prepare_v2(db, zSql, nByte, ppStmt, pzTail);
 }
 
 // ============================================================================
 // Interposed SQLite Functions - Bind
 // ============================================================================
 
+// Helper to map SQLite parameter index to PostgreSQL parameter index
+// Handles named parameters (:name) by finding the correct position
+static int pg_map_param_index(pg_stmt_t *pg_stmt, sqlite3_stmt *pStmt, int sqlite_idx) {
+    if (!pg_stmt) {
+        LOG_DEBUG("pg_map_param_index: no pg_stmt, using direct mapping idx=%d -> %d", sqlite_idx, sqlite_idx - 1);
+        return sqlite_idx - 1;
+    }
+
+    // If we have named parameters, we need to map them
+    if (pg_stmt->param_names && pg_stmt->param_count > 0) {
+        // Get the parameter name from SQLite
+        const char *param_name = sqlite3_bind_parameter_name(pStmt, sqlite_idx);
+        LOG_DEBUG("pg_map_param_index: sqlite_idx=%d, param_name=%s, param_count=%d",
+                 sqlite_idx, param_name ? param_name : "NULL", pg_stmt->param_count);
+
+        if (param_name) {
+            // Remove the : prefix if present
+            const char *clean_name = param_name;
+            if (param_name[0] == ':') clean_name = param_name + 1;
+
+            // Debug: show all param names
+            for (int i = 0; i < pg_stmt->param_count && i < 5; i++) {
+                LOG_DEBUG("  param_names[%d] = %s", i, pg_stmt->param_names[i] ? pg_stmt->param_names[i] : "NULL");
+            }
+
+            // Find this name in our param_names array
+            for (int i = 0; i < pg_stmt->param_count; i++) {
+                if (pg_stmt->param_names[i] && strcmp(pg_stmt->param_names[i], clean_name) == 0) {
+                    LOG_DEBUG("  -> Found match at pg_idx=%d", i);
+                    return i;  // Found it! Return the PostgreSQL position
+                }
+            }
+            LOG_ERROR("Named parameter '%s' not found in translation (sqlite_idx=%d)", clean_name, sqlite_idx);
+        } else {
+            LOG_DEBUG("  -> No parameter name, using direct mapping");
+        }
+    } else {
+        LOG_DEBUG("pg_map_param_index: no param_names (count=%d), using direct mapping idx=%d -> %d",
+                 pg_stmt->param_count, sqlite_idx, sqlite_idx - 1);
+    }
+
+    // For positional parameters (?) or if name not found, use direct mapping
+    return sqlite_idx - 1;
+}
+
 static int my_sqlite3_bind_int(sqlite3_stmt *pStmt, int idx, int val) {
     int rc = sqlite3_bind_int(pStmt, idx, val);
 
     pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
     if (pg_stmt && idx > 0 && idx <= MAX_PARAMS) {
-        char buf[32];
-        snprintf(buf, sizeof(buf), "%d", val);
-        if (pg_stmt->param_values[idx-1]) free(pg_stmt->param_values[idx-1]);
-        pg_stmt->param_values[idx-1] = strdup(buf);
-        if (idx > pg_stmt->param_count) pg_stmt->param_count = idx;
+        int pg_idx = pg_map_param_index(pg_stmt, pStmt, idx);
+        if (pg_idx >= 0 && pg_idx < MAX_PARAMS) {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%d", val);
+            if (pg_stmt->param_values[pg_idx]) free(pg_stmt->param_values[pg_idx]);
+            pg_stmt->param_values[pg_idx] = strdup(buf);
+        }
     }
 
     return rc;
@@ -488,11 +671,13 @@ static int my_sqlite3_bind_int64(sqlite3_stmt *pStmt, int idx, sqlite3_int64 val
 
     pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
     if (pg_stmt && idx > 0 && idx <= MAX_PARAMS) {
-        char buf[32];
-        snprintf(buf, sizeof(buf), "%lld", val);
-        if (pg_stmt->param_values[idx-1]) free(pg_stmt->param_values[idx-1]);
-        pg_stmt->param_values[idx-1] = strdup(buf);
-        if (idx > pg_stmt->param_count) pg_stmt->param_count = idx;
+        int pg_idx = pg_map_param_index(pg_stmt, pStmt, idx);
+        if (pg_idx >= 0 && pg_idx < MAX_PARAMS) {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%lld", val);
+            if (pg_stmt->param_values[pg_idx]) free(pg_stmt->param_values[pg_idx]);
+            pg_stmt->param_values[pg_idx] = strdup(buf);
+        }
     }
 
     return rc;
@@ -503,11 +688,13 @@ static int my_sqlite3_bind_double(sqlite3_stmt *pStmt, int idx, double val) {
 
     pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
     if (pg_stmt && idx > 0 && idx <= MAX_PARAMS) {
-        char buf[64];
-        snprintf(buf, sizeof(buf), "%.17g", val);
-        if (pg_stmt->param_values[idx-1]) free(pg_stmt->param_values[idx-1]);
-        pg_stmt->param_values[idx-1] = strdup(buf);
-        if (idx > pg_stmt->param_count) pg_stmt->param_count = idx;
+        int pg_idx = pg_map_param_index(pg_stmt, pStmt, idx);
+        if (pg_idx >= 0 && pg_idx < MAX_PARAMS) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "%.17g", val);
+            if (pg_stmt->param_values[pg_idx]) free(pg_stmt->param_values[pg_idx]);
+            pg_stmt->param_values[pg_idx] = strdup(buf);
+        }
     }
 
     return rc;
@@ -515,21 +702,54 @@ static int my_sqlite3_bind_double(sqlite3_stmt *pStmt, int idx, double val) {
 
 static int my_sqlite3_bind_text(sqlite3_stmt *pStmt, int idx, const char *val,
                                  int nBytes, void (*destructor)(void*)) {
+    // Debug: always log bind_text calls
+    static int bind_count = 0;
+    if (++bind_count <= 10) {
+        LOG_ERROR("BIND_TEXT_CALL #%d: pStmt=%p idx=%d val='%.30s'",
+                 bind_count, (void*)pStmt, idx, val ? val : "NULL");
+    }
+
     int rc = sqlite3_bind_text(pStmt, idx, val, nBytes, destructor);
 
     pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
+
+    // Debug: check if pg_find_stmt is working
+    if (idx == 9 && val) {  // title is around index 9
+        LOG_ERROR("BIND_TEXT idx=9: pg_stmt=%p val='%.50s'", (void*)pg_stmt, val);
+        if (pg_stmt) {
+            LOG_ERROR("  pg_stmt->sql=%s", pg_stmt->sql ? "SET" : "NULL");
+        }
+    }
+
     if (pg_stmt && idx > 0 && idx <= MAX_PARAMS && val) {
-        if (pg_stmt->param_values[idx-1]) free(pg_stmt->param_values[idx-1]);
-        if (nBytes < 0) {
-            pg_stmt->param_values[idx-1] = strdup(val);
-        } else {
-            pg_stmt->param_values[idx-1] = malloc(nBytes + 1);
-            if (pg_stmt->param_values[idx-1]) {
-                memcpy(pg_stmt->param_values[idx-1], val, nBytes);
-                pg_stmt->param_values[idx-1][nBytes] = '\0';
+        int pg_idx = pg_map_param_index(pg_stmt, pStmt, idx);
+
+        // Debug: log bind_text for metadata_items INSERT
+        if (pg_stmt->sql && strcasestr(pg_stmt->sql, "INSERT INTO metadata_items")) {
+            const char *param_name = sqlite3_bind_parameter_name(pStmt, idx);
+            const char *truncated_val = val;
+            if (nBytes > 50) {
+                char buf[55];
+                memcpy(buf, val, 50);
+                strcpy(buf + 50, "...");
+                truncated_val = buf;
+            }
+            LOG_ERROR("BIND_TEXT metadata_items: sqlite_idx=%d param_name=%s pg_idx=%d val='%s'",
+                     idx, param_name ? param_name : "NULL", pg_idx, truncated_val);
+        }
+
+        if (pg_idx >= 0 && pg_idx < MAX_PARAMS) {
+            if (pg_stmt->param_values[pg_idx]) free(pg_stmt->param_values[pg_idx]);
+            if (nBytes < 0) {
+                pg_stmt->param_values[pg_idx] = strdup(val);
+            } else {
+                pg_stmt->param_values[pg_idx] = malloc(nBytes + 1);
+                if (pg_stmt->param_values[pg_idx]) {
+                    memcpy(pg_stmt->param_values[pg_idx], val, nBytes);
+                    pg_stmt->param_values[pg_idx][nBytes] = '\0';
+                }
             }
         }
-        if (idx > pg_stmt->param_count) pg_stmt->param_count = idx;
     }
 
     return rc;
@@ -541,14 +761,123 @@ static int my_sqlite3_bind_blob(sqlite3_stmt *pStmt, int idx, const void *val,
 
     pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
     if (pg_stmt && idx > 0 && idx <= MAX_PARAMS && val && nBytes > 0) {
-        if (pg_stmt->param_values[idx-1]) free(pg_stmt->param_values[idx-1]);
-        pg_stmt->param_values[idx-1] = malloc(nBytes);
-        if (pg_stmt->param_values[idx-1]) {
-            memcpy(pg_stmt->param_values[idx-1], val, nBytes);
+        int pg_idx = pg_map_param_index(pg_stmt, pStmt, idx);
+        if (pg_idx >= 0 && pg_idx < MAX_PARAMS) {
+            if (pg_stmt->param_values[pg_idx]) free(pg_stmt->param_values[pg_idx]);
+            pg_stmt->param_values[pg_idx] = malloc(nBytes);
+            if (pg_stmt->param_values[pg_idx]) {
+                memcpy(pg_stmt->param_values[pg_idx], val, nBytes);
+            }
+            pg_stmt->param_lengths[pg_idx] = nBytes;
+            pg_stmt->param_formats[pg_idx] = 1;  // binary
         }
-        pg_stmt->param_lengths[idx-1] = nBytes;
-        pg_stmt->param_formats[idx-1] = 1;  // binary
-        if (idx > pg_stmt->param_count) pg_stmt->param_count = idx;
+    }
+
+    return rc;
+}
+
+// sqlite3_bind_blob64 - 64-bit version for large blobs
+static int my_sqlite3_bind_blob64(sqlite3_stmt *pStmt, int idx, const void *val,
+                                   sqlite3_uint64 nBytes, void (*destructor)(void*)) {
+    int rc = sqlite3_bind_blob64(pStmt, idx, val, nBytes, destructor);
+
+    pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
+    if (pg_stmt && idx > 0 && idx <= MAX_PARAMS && val && nBytes > 0) {
+        int pg_idx = pg_map_param_index(pg_stmt, pStmt, idx);
+        if (pg_idx >= 0 && pg_idx < MAX_PARAMS) {
+            if (pg_stmt->param_values[pg_idx]) free(pg_stmt->param_values[pg_idx]);
+            pg_stmt->param_values[pg_idx] = malloc((size_t)nBytes);
+            if (pg_stmt->param_values[pg_idx]) {
+                memcpy(pg_stmt->param_values[pg_idx], val, (size_t)nBytes);
+            }
+            pg_stmt->param_lengths[pg_idx] = (int)nBytes;
+            pg_stmt->param_formats[pg_idx] = 1;  // binary
+        }
+    }
+
+    return rc;
+}
+
+// sqlite3_bind_text64 - critical for Plex which uses this for text values!
+static int my_sqlite3_bind_text64(sqlite3_stmt *pStmt, int idx, const char *val,
+                                   sqlite3_uint64 nBytes, void (*destructor)(void*),
+                                   unsigned char encoding) {
+    int rc = sqlite3_bind_text64(pStmt, idx, val, nBytes, destructor, encoding);
+
+    pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
+    if (pg_stmt && idx > 0 && idx <= MAX_PARAMS && val) {
+        int pg_idx = pg_map_param_index(pg_stmt, pStmt, idx);
+        if (pg_idx >= 0 && pg_idx < MAX_PARAMS) {
+            if (pg_stmt->param_values[pg_idx]) free(pg_stmt->param_values[pg_idx]);
+            if (nBytes == (sqlite3_uint64)-1) {
+                pg_stmt->param_values[pg_idx] = strdup(val);
+            } else {
+                pg_stmt->param_values[pg_idx] = malloc((size_t)nBytes + 1);
+                if (pg_stmt->param_values[pg_idx]) {
+                    memcpy(pg_stmt->param_values[pg_idx], val, (size_t)nBytes);
+                    pg_stmt->param_values[pg_idx][(size_t)nBytes] = '\0';
+                }
+            }
+        }
+    }
+
+    return rc;
+}
+
+// sqlite3_bind_value - copies value from another sqlite3_value
+static int my_sqlite3_bind_value(sqlite3_stmt *pStmt, int idx, const sqlite3_value *pValue) {
+    int rc = sqlite3_bind_value(pStmt, idx, pValue);
+
+    pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
+    if (pg_stmt && idx > 0 && idx <= MAX_PARAMS && pValue) {
+        int pg_idx = pg_map_param_index(pg_stmt, pStmt, idx);
+        if (pg_idx >= 0 && pg_idx < MAX_PARAMS) {
+            // Get value type and extract appropriately
+            int vtype = sqlite3_value_type(pValue);
+            if (pg_stmt->param_values[pg_idx]) {
+                free(pg_stmt->param_values[pg_idx]);
+                pg_stmt->param_values[pg_idx] = NULL;
+            }
+
+            switch (vtype) {
+                case SQLITE_INTEGER: {
+                    sqlite3_int64 v = sqlite3_value_int64(pValue);
+                    char buf[32];
+                    snprintf(buf, sizeof(buf), "%lld", v);
+                    pg_stmt->param_values[pg_idx] = strdup(buf);
+                    break;
+                }
+                case SQLITE_FLOAT: {
+                    double v = sqlite3_value_double(pValue);
+                    char buf[64];
+                    snprintf(buf, sizeof(buf), "%.17g", v);
+                    pg_stmt->param_values[pg_idx] = strdup(buf);
+                    break;
+                }
+                case SQLITE_TEXT: {
+                    const char *v = (const char *)sqlite3_value_text(pValue);
+                    if (v) pg_stmt->param_values[pg_idx] = strdup(v);
+                    break;
+                }
+                case SQLITE_BLOB: {
+                    int len = sqlite3_value_bytes(pValue);
+                    const void *v = sqlite3_value_blob(pValue);
+                    if (v && len > 0) {
+                        pg_stmt->param_values[pg_idx] = malloc(len);
+                        if (pg_stmt->param_values[pg_idx]) {
+                            memcpy(pg_stmt->param_values[pg_idx], v, len);
+                        }
+                        pg_stmt->param_lengths[pg_idx] = len;
+                        pg_stmt->param_formats[pg_idx] = 1;  // binary
+                    }
+                    break;
+                }
+                case SQLITE_NULL:
+                default:
+                    // Leave as NULL
+                    break;
+            }
+        }
     }
 
     return rc;
@@ -559,11 +888,13 @@ static int my_sqlite3_bind_null(sqlite3_stmt *pStmt, int idx) {
 
     pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
     if (pg_stmt && idx > 0 && idx <= MAX_PARAMS) {
-        if (pg_stmt->param_values[idx-1]) {
-            free(pg_stmt->param_values[idx-1]);
-            pg_stmt->param_values[idx-1] = NULL;
+        int pg_idx = pg_map_param_index(pg_stmt, pStmt, idx);
+        if (pg_idx >= 0 && pg_idx < MAX_PARAMS) {
+            if (pg_stmt->param_values[pg_idx]) {
+                free(pg_stmt->param_values[pg_idx]);
+                pg_stmt->param_values[pg_idx] = NULL;
+            }
         }
-        if (idx > pg_stmt->param_count) pg_stmt->param_count = idx;
     }
 
     return rc;
@@ -593,6 +924,12 @@ static int my_sqlite3_step(sqlite3_stmt *pStmt) {
 
             // Handle cached WRITE
             if (sql && is_write_operation(sql) && !should_skip_sql(sql)) {
+                // Debug: log cached INSERT for metadata_items
+                if (strcasestr(sql, "INSERT") && strcasestr(sql, "metadata_items")) {
+                    LOG_ERROR("CACHED INSERT metadata_items:");
+                    LOG_ERROR("  expanded_sql=%s", expanded_sql ? "YES" : "NO");
+                    LOG_ERROR("  sql (first 300): %.300s", sql);
+                }
                 // CRITICAL FIX: Check if this cached write was already executed
                 pg_stmt_t *cached = pg_find_cached_stmt(pStmt);
                 if (cached && cached->write_executed) {
@@ -764,7 +1101,7 @@ static int my_sqlite3_step(sqlite3_stmt *pStmt) {
     }
 
     if (pg_stmt && pg_stmt->pg_sql && exec_conn && exec_conn->conn) {
-        const char *paramValues[MAX_PARAMS];
+        const char *paramValues[MAX_PARAMS] = {NULL};  // Initialize to prevent garbage access
         for (int i = 0; i < pg_stmt->param_count && i < MAX_PARAMS; i++) {
             paramValues[i] = pg_stmt->param_values[i];
         }
@@ -816,24 +1153,8 @@ static int my_sqlite3_step(sqlite3_stmt *pStmt) {
                     if (strstr(pg_stmt->pg_sql, "play_queue_generators")) {
                         LOG_INFO("SELECT play_queue_generators returned %d rows", PQntuples(pg_stmt->result));
                     }
-                    // Log media_parts results
-                    if (strstr(pg_stmt->pg_sql, "media_parts") || strstr(pg_stmt->pg_sql, "media_items")) {
-                        LOG_INFO("MEDIA QUERY returned %d rows, %d cols", pg_stmt->num_rows, pg_stmt->num_cols);
-                    }
-
-                    // Log ALL queries that have metadata_type in SELECT or have metadata_items
-                    if (strstr(pg_stmt->pg_sql, "metadata_items") || strstr(pg_stmt->pg_sql, "metadata_type")) {
-                        LOG_ERROR("METADATA_QUERY: returned %d rows, %d cols", pg_stmt->num_rows, pg_stmt->num_cols);
-                        LOG_ERROR("  Query: %.200s", pg_stmt->pg_sql);
-                        // Log all column names
-                        LOG_ERROR("  Columns:");
-                        for (int i = 0; i < pg_stmt->num_cols && i < 50; i++) {
-                            LOG_ERROR("    [%d] %s", i, PQfname(pg_stmt->result, i));
-                        }
-                        if (pg_stmt->num_cols > 50) {
-                            LOG_ERROR("    ... (%d total columns)", pg_stmt->num_cols);
-                        }
-                    }
+                    // Verbose query logging disabled for performance
+                    // Enable DEBUG level logging to see query details
                 } else {
                     log_sql_fallback(pg_stmt->sql, pg_stmt->pg_sql,
                                      PQerrorMessage(exec_conn->conn), "PREPARED READ");
@@ -860,6 +1181,27 @@ static int my_sqlite3_step(sqlite3_stmt *pStmt) {
             if (strstr(pg_stmt->pg_sql, "play_queue_generators")) {
                 LOG_INFO("INSERT play_queue_generators on thread %p conn %p",
                         (void*)pthread_self(), (void*)exec_conn);
+            }
+
+            // Debug: log INSERT params for troubleshooting
+            if (pg_stmt->sql && strcasestr(pg_stmt->sql, "INSERT INTO metadata_items")) {
+                LOG_ERROR("STEP metadata_items INSERT: param_count=%d", pg_stmt->param_count);
+                LOG_ERROR("  PARAMS: [0]=%s [1]=%s [2]=%s [8]=%s [9]=%s",
+                         paramValues[0] ? paramValues[0] : "NULL",
+                         paramValues[1] ? paramValues[1] : "NULL",
+                         paramValues[2] ? paramValues[2] : "NULL",
+                         paramValues[8] ? paramValues[8] : "NULL",  // title
+                         paramValues[9] ? paramValues[9] : "NULL"); // title_sort
+            }
+            // Debug: log play_queue_generators INSERT params
+            if (pg_stmt->sql && strcasestr(pg_stmt->sql, "play_queue_generators")) {
+                LOG_ERROR("STEP play_queue_generators INSERT: param_count=%d", pg_stmt->param_count);
+                LOG_ERROR("  PARAMS: [0]=%s [1]=%s [2]=%s [3]=%s",
+                         paramValues[0] ? paramValues[0] : "NULL",  // playlist_id
+                         paramValues[1] ? paramValues[1] : "NULL",  // metadata_item_id
+                         paramValues[2] ? paramValues[2] : "NULL",  // uri
+                         paramValues[3] ? paramValues[3] : "NULL"); // limit
+                LOG_ERROR("  SQL: %.300s", pg_stmt->pg_sql);
             }
 
             PGresult *res = PQexecParams(exec_conn->conn, pg_stmt->pg_sql,
@@ -1252,13 +1594,15 @@ static sqlite3_value* my_sqlite3_column_value(sqlite3_stmt *pStmt, int idx) {
             return NULL;
         }
 
-        // Return a fake value from our pool
+        // Return a fake value from our pool (thread-safe)
+        pthread_mutex_lock(&fake_value_mutex);
         int slot = fake_value_next++ % MAX_FAKE_VALUES;
         pg_fake_value_t *fake = &fake_value_pool[slot];
         fake->magic = PG_FAKE_VALUE_MAGIC;
         fake->pg_stmt = pg_stmt;
         fake->col_idx = idx;
         fake->row_idx = pg_stmt->current_row;
+        pthread_mutex_unlock(&fake_value_mutex);
 
         return (sqlite3_value*)fake;
     }
@@ -1411,6 +1755,14 @@ static int my_sqlite3_changes(sqlite3 *db) {
     return sqlite3_changes(db);
 }
 
+static sqlite3_int64 my_sqlite3_changes64(sqlite3 *db) {
+    pg_connection_t *pg_conn = pg_find_connection(db);
+    if (pg_conn && pg_conn->is_pg_active) {
+        return (sqlite3_int64)pg_conn->last_changes;
+    }
+    return sqlite3_changes64(db);
+}
+
 static sqlite3_int64 my_sqlite3_last_insert_rowid(sqlite3 *db) {
     pg_connection_t *pg_conn = pg_find_connection(db);
 
@@ -1485,17 +1837,22 @@ DYLD_INTERPOSE(my_sqlite3_close, sqlite3_close)
 DYLD_INTERPOSE(my_sqlite3_close_v2, sqlite3_close_v2)
 DYLD_INTERPOSE(my_sqlite3_exec, sqlite3_exec)
 DYLD_INTERPOSE(my_sqlite3_changes, sqlite3_changes)
+DYLD_INTERPOSE(my_sqlite3_changes64, sqlite3_changes64)
 DYLD_INTERPOSE(my_sqlite3_last_insert_rowid, sqlite3_last_insert_rowid)
 DYLD_INTERPOSE(my_sqlite3_get_table, sqlite3_get_table)
 
 DYLD_INTERPOSE(my_sqlite3_prepare, sqlite3_prepare)
 DYLD_INTERPOSE(my_sqlite3_prepare_v2, sqlite3_prepare_v2)
+DYLD_INTERPOSE(my_sqlite3_prepare_v3, sqlite3_prepare_v3)
 DYLD_INTERPOSE(my_sqlite3_prepare16_v2, sqlite3_prepare16_v2)
 DYLD_INTERPOSE(my_sqlite3_bind_int, sqlite3_bind_int)
 DYLD_INTERPOSE(my_sqlite3_bind_int64, sqlite3_bind_int64)
 DYLD_INTERPOSE(my_sqlite3_bind_double, sqlite3_bind_double)
 DYLD_INTERPOSE(my_sqlite3_bind_text, sqlite3_bind_text)
+DYLD_INTERPOSE(my_sqlite3_bind_text64, sqlite3_bind_text64)
 DYLD_INTERPOSE(my_sqlite3_bind_blob, sqlite3_bind_blob)
+DYLD_INTERPOSE(my_sqlite3_bind_blob64, sqlite3_bind_blob64)
+DYLD_INTERPOSE(my_sqlite3_bind_value, sqlite3_bind_value)
 DYLD_INTERPOSE(my_sqlite3_bind_null, sqlite3_bind_null)
 DYLD_INTERPOSE(my_sqlite3_step, sqlite3_step)
 DYLD_INTERPOSE(my_sqlite3_reset, sqlite3_reset)

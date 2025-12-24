@@ -22,7 +22,6 @@
 
 char* sql_translate_functions(const char *sql) {
     if (!sql) return NULL;
-    LOG_ERROR("sql_translate_functions entry");
 
     char *current = strdup(sql);
     if (!current) return NULL;
@@ -32,157 +31,172 @@ char* sql_translate_functions(const char *sql) {
     // 0. FTS4 queries -> ILIKE queries
     temp = translate_fts(current);
     free(current);
-    if (!temp) { LOG_ERROR("translate_fts returned NULL"); return NULL; }
+    if (!temp) { return NULL; }
     current = temp;
 
     // 0b. Convert SQLite NULL sorting to PostgreSQL NULLS LAST
     // This must happen before translate_distinct_orderby
     temp = translate_null_sorting(current);
     free(current);
-    if (!temp) { LOG_ERROR("translate_null_sorting returned NULL"); return NULL; }
+    if (!temp) { return NULL; }
     current = temp;
 
     // 0c. Remove DISTINCT when ORDER BY is present
     temp = translate_distinct_orderby(current);
     free(current);
-    if (!temp) { LOG_ERROR("translate_distinct_orderby returned NULL"); return NULL; }
+    if (!temp) { return NULL; }
     current = temp;
 
     // 0e. Simplify typeof fixup patterns (before iif/typeof translations)
     temp = simplify_typeof_fixup(current);
     free(current);
-    if (!temp) { LOG_ERROR("simplify_typeof_fixup returned NULL"); return NULL; }
+    if (!temp) { return NULL; }
     current = temp;
 
     // 0f. Fix duplicate assignments (UPDATE set a=1, a=2)
     temp = fix_duplicate_assignments(current);
     free(current);
-    if (!temp) { LOG_ERROR("fix_duplicate_assignments returned NULL"); return NULL; }
+    if (!temp) { return NULL; }
     current = temp;
 
     // 1. iif() -> CASE WHEN
     temp = translate_iif(current);
     free(current);
-    if (!temp) { LOG_ERROR("translate_iif returned NULL"); return NULL; }
+    if (!temp) { return NULL; }
     current = temp;
 
     // 2. typeof() -> pg_typeof()::text
     temp = translate_typeof(current);
     free(current);
-    if (!temp) { LOG_ERROR("translate_typeof returned NULL"); return NULL; }
+    if (!temp) { return NULL; }
     current = temp;
 
     // 3. strftime() -> EXTRACT/TO_CHAR
     temp = translate_strftime(current);
     free(current);
-    if (!temp) { LOG_ERROR("translate_strftime returned NULL"); return NULL; }
+    if (!temp) { return NULL; }
     current = temp;
 
     // 4. unixepoch() -> EXTRACT(EPOCH FROM ...)
     temp = translate_unixepoch(current);
     free(current);
-    if (!temp) { LOG_ERROR("translate_unixepoch returned NULL"); return NULL; }
+    if (!temp) { return NULL; }
     current = temp;
 
     // 5. datetime('now') -> NOW()
     temp = translate_datetime(current);
     free(current);
-    if (!temp) { LOG_ERROR("translate_datetime returned NULL"); return NULL; }
+    if (!temp) { return NULL; }
     current = temp;
 
     // 5a. last_insert_rowid() -> lastval()
     temp = translate_last_insert_rowid(current);
     free(current);
-    if (!temp) { LOG_ERROR("translate_last_insert_rowid returned NULL"); return NULL; }
+    if (!temp) { return NULL; }
     current = temp;
 
     // 5b. json_each() -> json_array_elements()
     temp = translate_json_each(current);
     free(current);
-    if (!temp) { LOG_ERROR("translate_json_each returned NULL"); return NULL; }
+    if (!temp) { return NULL; }
     current = temp;
 
     // 6. IFNULL -> COALESCE
     temp = str_replace_nocase(current, "IFNULL(", "COALESCE(");
     free(current);
-    if (!temp) { LOG_ERROR("IFNULL replacement returned NULL"); return NULL; }
+    if (!temp) { return NULL; }
     current = temp;
 
     // 7. SUBSTR -> SUBSTRING
     temp = str_replace_nocase(current, "SUBSTR(", "SUBSTRING(");
     free(current);
-    if (!temp) { LOG_ERROR("SUBSTR replacement returned NULL"); return NULL; }
+    if (!temp) { return NULL; }
     current = temp;
 
     // 11. max(a, b) -> GREATEST(a, b)
     temp = translate_max_to_greatest(current);
     free(current);
-    if (!temp) { LOG_ERROR("translate_max_to_greatest returned NULL"); return NULL; }
+    if (!temp) { return NULL; }
     current = temp;
 
     // 12. min(a, b) -> LEAST(a, b)
     temp = translate_min_to_least(current);
     free(current);
-    if (!temp) { LOG_ERROR("translate_min_to_least returned NULL"); return NULL; }
+    if (!temp) { return NULL; }
     current = temp;
 
     // 13. CASE THEN 0/1 -> THEN FALSE/TRUE
     temp = translate_case_booleans(current);
     free(current);
-    if (!temp) { LOG_ERROR("translate_case_booleans returned NULL"); return NULL; }
+    if (!temp) { return NULL; }
     current = temp;
 
     // 14. Add alias to subqueries in FROM clause
     temp = add_subquery_alias(current);
     free(current);
-    if (!temp) { LOG_ERROR("add_subquery_alias returned NULL"); return NULL; }
+    if (!temp) { return NULL; }
     current = temp;
 
     // 15. Fix forward reference in self-joins
     temp = fix_forward_reference_joins(current);
     free(current);
-    if (!temp) { LOG_ERROR("fix_forward_reference_joins returned NULL"); return NULL; }
+    if (!temp) { return NULL; }
     current = temp;
 
     // 15a. Fix integer/text mismatch
     temp = fix_integer_text_mismatch(current);
     free(current);
-    if (!temp) { LOG_ERROR("fix_integer_text_mismatch returned NULL"); return NULL; }
+    if (!temp) { return NULL; }
     current = temp;
 
     // 15b. Fix GROUP BY strict mode (legacy single-case handler)
     temp = fix_group_by_strict(current);
     free(current);
-    if (!temp) { LOG_ERROR("fix_group_by_strict returned NULL"); return NULL; }
+    if (!temp) { return NULL; }
     current = temp;
 
     // 15b2. Fix GROUP BY strict mode (complete rewriter)
     temp = fix_group_by_strict_complete(current);
     free(current);
-    if (!temp) { LOG_ERROR("fix_group_by_strict_complete returned NULL"); return NULL; }
+    if (!temp) { return NULL; }
     current = temp;
 
     // 15c. Strip "collate icu_root"
     temp = strip_icu_collation(current);
     free(current);
-    if (!temp) { LOG_ERROR("strip_icu_collation returned NULL"); return NULL; }
+    if (!temp) { return NULL; }
     current = temp;
 
     // 15d. Fix JSON operator ->> on TEXT columns
     temp = fix_json_operator_on_text(current);
     free(current);
-    if (!temp) { LOG_ERROR("fix_json_operator_on_text returned NULL"); return NULL; }
+    if (!temp) { return NULL; }
     current = temp;
 
-    // 16. Fix incomplete GROUP BY for specific queries
-    if (strcasestr(current, "metadata_item_views.originally_available_at") &&
-        strcasestr(current, "group by grandparents.id order by")) {
-        temp = str_replace(current,
-            "group by grandparents.id order by",
-            "group by grandparents.id,metadata_item_views.originally_available_at,metadata_item_views.parent_index,metadata_item_views.\"index\",grandparents.library_section_id,grandparentsSettings.extra_data,metadata_item_views.viewed_at order by");
-        free(current);
-        if (!temp) { LOG_ERROR("fix_incomplete_group_by returned NULL"); return NULL; }
-        current = temp;
+    // 16. Fix incomplete GROUP BY for specific queries - this runs BEFORE fix_group_by_strict_complete
+    // so we can't rely on the full GROUP BY clause being present yet
+    // Just do nothing here and let fix_group_by_strict_complete handle it
+
+    // Fix for metadata_item_views query with max(viewed_at) - must run AFTER GROUP BY fix
+    // This handles the case where ORDER BY uses a column that appears in an aggregate
+    if (strcasestr(current, "max(viewed_at") && strcasestr(current, "order by viewed_at")) {
+        LOG_ERROR("ATTEMPTING FIX: Found max(viewed_at with order by viewed_at");
+        LOG_ERROR("SQL BEFORE FIX: %.500s", current);
+
+        // Replace "order by viewed_at" with "order by max(viewed_at)"
+        temp = str_replace_nocase(current, "order by viewed_at desc", "order by max(viewed_at) desc");
+        if (!temp) {
+            LOG_ERROR("First replacement failed, trying without DESC");
+            temp = str_replace_nocase(current, "order by viewed_at", "order by max(viewed_at)");
+        }
+        if (temp) {
+            LOG_ERROR("REPLACEMENT SUCCEEDED");
+            LOG_ERROR("SQL AFTER FIX: %.500s", temp);
+            free(current);
+            current = temp;
+        } else {
+            LOG_ERROR("REPLACEMENT FAILED - both attempts returned NULL");
+        }
     }
 
     // external_metadata_items query fix
@@ -192,7 +206,7 @@ char* sql_translate_functions(const char *sql) {
             "group by title order by",
             "group by title,external_metadata_items.id,uri,user_title,library_section_id,metadata_type,year,added_at,updated_at,extra_data order by");
         free(current);
-        if (!temp) { LOG_ERROR("external_metadata_items fix returned NULL"); return NULL; }
+        if (!temp) { return NULL; }
         current = temp;
     }
 

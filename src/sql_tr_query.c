@@ -314,7 +314,6 @@ static void convert_fts_term(const char *sqlite_term, char *pg_term, size_t pg_t
 
 char* translate_fts(const char *sql) {
     if (!sql) return NULL;
-    LOG_ERROR("translate_fts input: %.100s", sql);
 
     // Allocate result buffer (generous size)
     char *result = malloc(strlen(sql) * 3 + 1024);

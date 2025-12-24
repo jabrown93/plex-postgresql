@@ -30,12 +30,12 @@ typedef struct {
 
 static pg_connection_t *connections[MAX_CONNECTIONS];
 static pthread_mutex_t connections_mutex = PTHREAD_MUTEX_INITIALIZER;
-static int client_initialized = 0;
+static volatile int client_initialized = 0;
+static pthread_once_t client_init_once = PTHREAD_ONCE_INIT;
 
 // Connection pool for library.db
 static pool_slot_t library_pool[POOL_SIZE];
 static pthread_mutex_t pool_mutex = PTHREAD_MUTEX_INITIALIZER;
-static int pool_initialized = 0;
 static char library_db_path[512] = {0};
 
 // Connection idle timeout (seconds) - close connections idle longer than this
@@ -64,13 +64,15 @@ static pg_connection_t* pool_get_connection(const char *db_path);
 // Initialization
 // ============================================================================
 
-void pg_client_init(void) {
-    if (client_initialized) return;
+static void do_client_init(void) {
     memset(connections, 0, sizeof(connections));
     memset(library_pool, 0, sizeof(library_pool));
-    pool_initialized = 0;
     client_initialized = 1;
     LOG_DEBUG("pg_client initialized with pool size %d", POOL_SIZE);
+}
+
+void pg_client_init(void) {
+    pthread_once(&client_init_once, do_client_init);
 }
 
 void pg_client_cleanup(void) {
@@ -101,7 +103,6 @@ void pg_client_cleanup(void) {
             library_pool[i].conn = NULL;
         }
     }
-    pool_initialized = 0;
     db_to_pool_count = 0;
     pthread_mutex_unlock(&pool_mutex);
 
