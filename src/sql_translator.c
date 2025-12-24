@@ -16,6 +16,25 @@
 #include "sql_translator_internal.h"
 #include "pg_logging.h"
 
+// Standard translation: call function, swap result
+#define TRANSLATE(func) do { \
+    temp = func(current); \
+    if (!temp) { return NULL; } \
+    free(current); \
+    current = temp; \
+} while(0)
+
+// Optimized replacement: skip str_replace_nocase entirely if pattern absent
+#define TRANSLATE_REPLACE(old_str, new_str) do { \
+    if (strcasestr(current, old_str)) { \
+        temp = str_replace_nocase(current, old_str, new_str); \
+        if (temp) { \
+            free(current); \
+            current = temp; \
+        } \
+    } \
+} while(0)
+
 // ============================================================================
 // Main Function Translator (orchestrates all function translations)
 // ============================================================================
@@ -28,150 +47,80 @@ char* sql_translate_functions(const char *sql) {
 
     char *temp;
 
+    // Use TRANSLATE macro for functions that return NULL when no changes
+    // Use TRANSLATE_REPLACE macro for simple string replacements (checks pattern first)
+
     // 0. FTS4 queries -> ILIKE queries
-    temp = translate_fts(current);
-    free(current);
-    if (!temp) { return NULL; }
-    current = temp;
+    TRANSLATE(translate_fts);
 
     // 0b. Convert SQLite NULL sorting to PostgreSQL NULLS LAST
-    // This must happen before translate_distinct_orderby
-    temp = translate_null_sorting(current);
-    free(current);
-    if (!temp) { return NULL; }
-    current = temp;
+    TRANSLATE(translate_null_sorting);
 
     // 0c. Remove DISTINCT when ORDER BY is present
-    temp = translate_distinct_orderby(current);
-    free(current);
-    if (!temp) { return NULL; }
-    current = temp;
+    TRANSLATE(translate_distinct_orderby);
 
-    // 0e. Simplify typeof fixup patterns (before iif/typeof translations)
-    temp = simplify_typeof_fixup(current);
-    free(current);
-    if (!temp) { return NULL; }
-    current = temp;
+    // 0e. Simplify typeof fixup patterns
+    TRANSLATE(simplify_typeof_fixup);
 
     // 0f. Fix duplicate assignments (UPDATE set a=1, a=2)
-    temp = fix_duplicate_assignments(current);
-    free(current);
-    if (!temp) { return NULL; }
-    current = temp;
+    TRANSLATE(fix_duplicate_assignments);
 
     // 1. iif() -> CASE WHEN
-    temp = translate_iif(current);
-    free(current);
-    if (!temp) { return NULL; }
-    current = temp;
+    TRANSLATE(translate_iif);
 
     // 2. typeof() -> pg_typeof()::text
-    temp = translate_typeof(current);
-    free(current);
-    if (!temp) { return NULL; }
-    current = temp;
+    TRANSLATE(translate_typeof);
 
     // 3. strftime() -> EXTRACT/TO_CHAR
-    temp = translate_strftime(current);
-    free(current);
-    if (!temp) { return NULL; }
-    current = temp;
+    TRANSLATE(translate_strftime);
 
     // 4. unixepoch() -> EXTRACT(EPOCH FROM ...)
-    temp = translate_unixepoch(current);
-    free(current);
-    if (!temp) { return NULL; }
-    current = temp;
+    TRANSLATE(translate_unixepoch);
 
     // 5. datetime('now') -> NOW()
-    temp = translate_datetime(current);
-    free(current);
-    if (!temp) { return NULL; }
-    current = temp;
+    TRANSLATE(translate_datetime);
 
     // 5a. last_insert_rowid() -> lastval()
-    temp = translate_last_insert_rowid(current);
-    free(current);
-    if (!temp) { return NULL; }
-    current = temp;
+    TRANSLATE(translate_last_insert_rowid);
 
     // 5b. json_each() -> json_array_elements()
-    temp = translate_json_each(current);
-    free(current);
-    if (!temp) { return NULL; }
-    current = temp;
+    TRANSLATE(translate_json_each);
 
-    // 6. IFNULL -> COALESCE
-    temp = str_replace_nocase(current, "IFNULL(", "COALESCE(");
-    free(current);
-    if (!temp) { return NULL; }
-    current = temp;
+    // 6. IFNULL -> COALESCE (only if pattern exists)
+    TRANSLATE_REPLACE("IFNULL(", "COALESCE(");
 
-    // 7. SUBSTR -> SUBSTRING
-    temp = str_replace_nocase(current, "SUBSTR(", "SUBSTRING(");
-    free(current);
-    if (!temp) { return NULL; }
-    current = temp;
+    // 7. SUBSTR -> SUBSTRING (only if pattern exists)
+    TRANSLATE_REPLACE("SUBSTR(", "SUBSTRING(");
 
     // 11. max(a, b) -> GREATEST(a, b)
-    temp = translate_max_to_greatest(current);
-    free(current);
-    if (!temp) { return NULL; }
-    current = temp;
+    TRANSLATE(translate_max_to_greatest);
 
     // 12. min(a, b) -> LEAST(a, b)
-    temp = translate_min_to_least(current);
-    free(current);
-    if (!temp) { return NULL; }
-    current = temp;
+    TRANSLATE(translate_min_to_least);
 
     // 13. CASE THEN 0/1 -> THEN FALSE/TRUE
-    temp = translate_case_booleans(current);
-    free(current);
-    if (!temp) { return NULL; }
-    current = temp;
+    TRANSLATE(translate_case_booleans);
 
     // 14. Add alias to subqueries in FROM clause
-    temp = add_subquery_alias(current);
-    free(current);
-    if (!temp) { return NULL; }
-    current = temp;
+    TRANSLATE(add_subquery_alias);
 
     // 15. Fix forward reference in self-joins
-    temp = fix_forward_reference_joins(current);
-    free(current);
-    if (!temp) { return NULL; }
-    current = temp;
+    TRANSLATE(fix_forward_reference_joins);
 
     // 15a. Fix integer/text mismatch
-    temp = fix_integer_text_mismatch(current);
-    free(current);
-    if (!temp) { return NULL; }
-    current = temp;
+    TRANSLATE(fix_integer_text_mismatch);
 
     // 15b. Fix GROUP BY strict mode (legacy single-case handler)
-    temp = fix_group_by_strict(current);
-    free(current);
-    if (!temp) { return NULL; }
-    current = temp;
+    TRANSLATE(fix_group_by_strict);
 
     // 15b2. Fix GROUP BY strict mode (complete rewriter)
-    temp = fix_group_by_strict_complete(current);
-    free(current);
-    if (!temp) { return NULL; }
-    current = temp;
+    TRANSLATE(fix_group_by_strict_complete);
 
     // 15c. Strip "collate icu_root"
-    temp = strip_icu_collation(current);
-    free(current);
-    if (!temp) { return NULL; }
-    current = temp;
+    TRANSLATE(strip_icu_collation);
 
     // 15d. Fix JSON operator ->> on TEXT columns
-    temp = fix_json_operator_on_text(current);
-    free(current);
-    if (!temp) { return NULL; }
-    current = temp;
+    TRANSLATE(fix_json_operator_on_text);
 
     // 16. Fix incomplete GROUP BY for specific queries - this runs BEFORE fix_group_by_strict_complete
     // so we can't rely on the full GROUP BY clause being present yet

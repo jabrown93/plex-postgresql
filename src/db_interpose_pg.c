@@ -656,10 +656,9 @@ static int my_sqlite3_bind_int(sqlite3_stmt *pStmt, int idx, int val) {
     if (pg_stmt && idx > 0 && idx <= MAX_PARAMS) {
         int pg_idx = pg_map_param_index(pg_stmt, pStmt, idx);
         if (pg_idx >= 0 && pg_idx < MAX_PARAMS) {
-            char buf[32];
-            snprintf(buf, sizeof(buf), "%d", val);
-            if (pg_stmt->param_values[pg_idx]) free(pg_stmt->param_values[pg_idx]);
-            pg_stmt->param_values[pg_idx] = strdup(buf);
+            // Use pre-allocated buffer instead of strdup
+            snprintf(pg_stmt->param_buffers[pg_idx], 32, "%d", val);
+            pg_stmt->param_values[pg_idx] = pg_stmt->param_buffers[pg_idx];
         }
     }
 
@@ -673,10 +672,9 @@ static int my_sqlite3_bind_int64(sqlite3_stmt *pStmt, int idx, sqlite3_int64 val
     if (pg_stmt && idx > 0 && idx <= MAX_PARAMS) {
         int pg_idx = pg_map_param_index(pg_stmt, pStmt, idx);
         if (pg_idx >= 0 && pg_idx < MAX_PARAMS) {
-            char buf[32];
-            snprintf(buf, sizeof(buf), "%lld", val);
-            if (pg_stmt->param_values[pg_idx]) free(pg_stmt->param_values[pg_idx]);
-            pg_stmt->param_values[pg_idx] = strdup(buf);
+            // Use pre-allocated buffer instead of strdup
+            snprintf(pg_stmt->param_buffers[pg_idx], 32, "%lld", val);
+            pg_stmt->param_values[pg_idx] = pg_stmt->param_buffers[pg_idx];
         }
     }
 
@@ -690,56 +688,35 @@ static int my_sqlite3_bind_double(sqlite3_stmt *pStmt, int idx, double val) {
     if (pg_stmt && idx > 0 && idx <= MAX_PARAMS) {
         int pg_idx = pg_map_param_index(pg_stmt, pStmt, idx);
         if (pg_idx >= 0 && pg_idx < MAX_PARAMS) {
-            char buf[64];
-            snprintf(buf, sizeof(buf), "%.17g", val);
-            if (pg_stmt->param_values[pg_idx]) free(pg_stmt->param_values[pg_idx]);
-            pg_stmt->param_values[pg_idx] = strdup(buf);
+            // Use pre-allocated buffer instead of strdup
+            snprintf(pg_stmt->param_buffers[pg_idx], 32, "%.17g", val);
+            pg_stmt->param_values[pg_idx] = pg_stmt->param_buffers[pg_idx];
         }
     }
 
     return rc;
 }
 
+// Helper: check if param_value points to pre-allocated buffer
+static inline int is_preallocated_buffer(pg_stmt_t *stmt, int idx) {
+    return stmt->param_values[idx] >= stmt->param_buffers[idx] &&
+           stmt->param_values[idx] < stmt->param_buffers[idx] + 32;
+}
+
 static int my_sqlite3_bind_text(sqlite3_stmt *pStmt, int idx, const char *val,
                                  int nBytes, void (*destructor)(void*)) {
-    // Debug: always log bind_text calls
-    static int bind_count = 0;
-    if (++bind_count <= 10) {
-        LOG_ERROR("BIND_TEXT_CALL #%d: pStmt=%p idx=%d val='%.30s'",
-                 bind_count, (void*)pStmt, idx, val ? val : "NULL");
-    }
-
     int rc = sqlite3_bind_text(pStmt, idx, val, nBytes, destructor);
 
     pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
-
-    // Debug: check if pg_find_stmt is working
-    if (idx == 9 && val) {  // title is around index 9
-        LOG_ERROR("BIND_TEXT idx=9: pg_stmt=%p val='%.50s'", (void*)pg_stmt, val);
-        if (pg_stmt) {
-            LOG_ERROR("  pg_stmt->sql=%s", pg_stmt->sql ? "SET" : "NULL");
-        }
-    }
-
     if (pg_stmt && idx > 0 && idx <= MAX_PARAMS && val) {
         int pg_idx = pg_map_param_index(pg_stmt, pStmt, idx);
 
-        // Debug: log bind_text for metadata_items INSERT
-        if (pg_stmt->sql && strcasestr(pg_stmt->sql, "INSERT INTO metadata_items")) {
-            const char *param_name = sqlite3_bind_parameter_name(pStmt, idx);
-            const char *truncated_val = val;
-            if (nBytes > 50) {
-                char buf[55];
-                memcpy(buf, val, 50);
-                strcpy(buf + 50, "...");
-                truncated_val = buf;
-            }
-            LOG_ERROR("BIND_TEXT metadata_items: sqlite_idx=%d param_name=%s pg_idx=%d val='%s'",
-                     idx, param_name ? param_name : "NULL", pg_idx, truncated_val);
-        }
-
         if (pg_idx >= 0 && pg_idx < MAX_PARAMS) {
-            if (pg_stmt->param_values[pg_idx]) free(pg_stmt->param_values[pg_idx]);
+            // Free old value only if it was dynamically allocated
+            if (pg_stmt->param_values[pg_idx] && !is_preallocated_buffer(pg_stmt, pg_idx)) {
+                free(pg_stmt->param_values[pg_idx]);
+                pg_stmt->param_values[pg_idx] = NULL;  // Prevent dangling pointer
+            }
             if (nBytes < 0) {
                 pg_stmt->param_values[pg_idx] = strdup(val);
             } else {
@@ -763,7 +740,10 @@ static int my_sqlite3_bind_blob(sqlite3_stmt *pStmt, int idx, const void *val,
     if (pg_stmt && idx > 0 && idx <= MAX_PARAMS && val && nBytes > 0) {
         int pg_idx = pg_map_param_index(pg_stmt, pStmt, idx);
         if (pg_idx >= 0 && pg_idx < MAX_PARAMS) {
-            if (pg_stmt->param_values[pg_idx]) free(pg_stmt->param_values[pg_idx]);
+            if (pg_stmt->param_values[pg_idx] && !is_preallocated_buffer(pg_stmt, pg_idx)) {
+                free(pg_stmt->param_values[pg_idx]);
+                pg_stmt->param_values[pg_idx] = NULL;  // Prevent dangling pointer
+            }
             pg_stmt->param_values[pg_idx] = malloc(nBytes);
             if (pg_stmt->param_values[pg_idx]) {
                 memcpy(pg_stmt->param_values[pg_idx], val, nBytes);
@@ -785,7 +765,10 @@ static int my_sqlite3_bind_blob64(sqlite3_stmt *pStmt, int idx, const void *val,
     if (pg_stmt && idx > 0 && idx <= MAX_PARAMS && val && nBytes > 0) {
         int pg_idx = pg_map_param_index(pg_stmt, pStmt, idx);
         if (pg_idx >= 0 && pg_idx < MAX_PARAMS) {
-            if (pg_stmt->param_values[pg_idx]) free(pg_stmt->param_values[pg_idx]);
+            if (pg_stmt->param_values[pg_idx] && !is_preallocated_buffer(pg_stmt, pg_idx)) {
+                free(pg_stmt->param_values[pg_idx]);
+                pg_stmt->param_values[pg_idx] = NULL;  // Prevent dangling pointer
+            }
             pg_stmt->param_values[pg_idx] = malloc((size_t)nBytes);
             if (pg_stmt->param_values[pg_idx]) {
                 memcpy(pg_stmt->param_values[pg_idx], val, (size_t)nBytes);
@@ -808,7 +791,10 @@ static int my_sqlite3_bind_text64(sqlite3_stmt *pStmt, int idx, const char *val,
     if (pg_stmt && idx > 0 && idx <= MAX_PARAMS && val) {
         int pg_idx = pg_map_param_index(pg_stmt, pStmt, idx);
         if (pg_idx >= 0 && pg_idx < MAX_PARAMS) {
-            if (pg_stmt->param_values[pg_idx]) free(pg_stmt->param_values[pg_idx]);
+            if (pg_stmt->param_values[pg_idx] && !is_preallocated_buffer(pg_stmt, pg_idx)) {
+                free(pg_stmt->param_values[pg_idx]);
+                pg_stmt->param_values[pg_idx] = NULL;  // Prevent dangling pointer
+            }
             if (nBytes == (sqlite3_uint64)-1) {
                 pg_stmt->param_values[pg_idx] = strdup(val);
             } else {
@@ -834,7 +820,7 @@ static int my_sqlite3_bind_value(sqlite3_stmt *pStmt, int idx, const sqlite3_val
         if (pg_idx >= 0 && pg_idx < MAX_PARAMS) {
             // Get value type and extract appropriately
             int vtype = sqlite3_value_type(pValue);
-            if (pg_stmt->param_values[pg_idx]) {
+            if (pg_stmt->param_values[pg_idx] && !is_preallocated_buffer(pg_stmt, pg_idx)) {
                 free(pg_stmt->param_values[pg_idx]);
                 pg_stmt->param_values[pg_idx] = NULL;
             }
@@ -890,7 +876,7 @@ static int my_sqlite3_bind_null(sqlite3_stmt *pStmt, int idx) {
     if (pg_stmt && idx > 0 && idx <= MAX_PARAMS) {
         int pg_idx = pg_map_param_index(pg_stmt, pStmt, idx);
         if (pg_idx >= 0 && pg_idx < MAX_PARAMS) {
-            if (pg_stmt->param_values[pg_idx]) {
+            if (pg_stmt->param_values[pg_idx] && !is_preallocated_buffer(pg_stmt, pg_idx)) {
                 free(pg_stmt->param_values[pg_idx]);
                 pg_stmt->param_values[pg_idx] = NULL;
             }
@@ -1101,6 +1087,9 @@ static int my_sqlite3_step(sqlite3_stmt *pStmt) {
     }
 
     if (pg_stmt && pg_stmt->pg_sql && exec_conn && exec_conn->conn) {
+        // Lock mutex to protect against concurrent access from multiple threads
+        pthread_mutex_lock(&pg_stmt->mutex);
+
         const char *paramValues[MAX_PARAMS] = {NULL};  // Initialize to prevent garbage access
         for (int i = 0; i < pg_stmt->param_count && i < MAX_PARAMS; i++) {
             paramValues[i] = pg_stmt->param_values[i];
@@ -1166,7 +1155,9 @@ static int my_sqlite3_step(sqlite3_stmt *pStmt) {
             }
 
             if (pg_stmt->result) {
-                return (pg_stmt->current_row < pg_stmt->num_rows) ? SQLITE_ROW : SQLITE_DONE;
+                int result = (pg_stmt->current_row < pg_stmt->num_rows) ? SQLITE_ROW : SQLITE_DONE;
+                pthread_mutex_unlock(&pg_stmt->mutex);
+                return result;
             }
         } else if (pg_stmt->is_pg == 1) {  // WRITE
             // CRITICAL FIX: Prevent duplicate execution of the same write
@@ -1174,6 +1165,7 @@ static int my_sqlite3_step(sqlite3_stmt *pStmt) {
             if (pg_stmt->write_executed) {
                 // Already executed this write, just return DONE
                 // This prevents the statistics_media INSERT storm bug
+                pthread_mutex_unlock(&pg_stmt->mutex);
                 return SQLITE_DONE;
             }
 
@@ -1186,22 +1178,24 @@ static int my_sqlite3_step(sqlite3_stmt *pStmt) {
             // Debug: log INSERT params for troubleshooting
             if (pg_stmt->sql && strcasestr(pg_stmt->sql, "INSERT INTO metadata_items")) {
                 LOG_ERROR("STEP metadata_items INSERT: param_count=%d", pg_stmt->param_count);
+                // CRITICAL FIX: Only access paramValues within bounds
                 LOG_ERROR("  PARAMS: [0]=%s [1]=%s [2]=%s [8]=%s [9]=%s",
-                         paramValues[0] ? paramValues[0] : "NULL",
-                         paramValues[1] ? paramValues[1] : "NULL",
-                         paramValues[2] ? paramValues[2] : "NULL",
-                         paramValues[8] ? paramValues[8] : "NULL",  // title
-                         paramValues[9] ? paramValues[9] : "NULL"); // title_sort
+                         (pg_stmt->param_count > 0 && paramValues[0]) ? paramValues[0] : "NULL",
+                         (pg_stmt->param_count > 1 && paramValues[1]) ? paramValues[1] : "NULL",
+                         (pg_stmt->param_count > 2 && paramValues[2]) ? paramValues[2] : "NULL",
+                         (pg_stmt->param_count > 8 && paramValues[8]) ? paramValues[8] : "NULL",  // title
+                         (pg_stmt->param_count > 9 && paramValues[9]) ? paramValues[9] : "NULL"); // title_sort
             }
             // Debug: log play_queue_generators INSERT params
             if (pg_stmt->sql && strcasestr(pg_stmt->sql, "play_queue_generators")) {
                 LOG_ERROR("STEP play_queue_generators INSERT: param_count=%d", pg_stmt->param_count);
+                // CRITICAL FIX: Only access paramValues within bounds
                 LOG_ERROR("  PARAMS: [0]=%s [1]=%s [2]=%s [3]=%s",
-                         paramValues[0] ? paramValues[0] : "NULL",  // playlist_id
-                         paramValues[1] ? paramValues[1] : "NULL",  // metadata_item_id
-                         paramValues[2] ? paramValues[2] : "NULL",  // uri
-                         paramValues[3] ? paramValues[3] : "NULL"); // limit
-                LOG_ERROR("  SQL: %.300s", pg_stmt->pg_sql);
+                         (pg_stmt->param_count > 0 && paramValues[0]) ? paramValues[0] : "NULL",  // playlist_id
+                         (pg_stmt->param_count > 1 && paramValues[1]) ? paramValues[1] : "NULL",  // metadata_item_id
+                         (pg_stmt->param_count > 2 && paramValues[2]) ? paramValues[2] : "NULL",  // uri
+                         (pg_stmt->param_count > 3 && paramValues[3]) ? paramValues[3] : "NULL"); // limit
+                LOG_ERROR("  SQL: %.300s", pg_stmt->pg_sql ? pg_stmt->pg_sql : "NULL");
             }
 
             PGresult *res = PQexecParams(exec_conn->conn, pg_stmt->pg_sql,
@@ -1231,6 +1225,8 @@ static int my_sqlite3_step(sqlite3_stmt *pStmt) {
             pg_stmt->write_executed = 1;
             PQclear(res);
         }
+
+        pthread_mutex_unlock(&pg_stmt->mutex);
     }
 
     if (pg_stmt && pg_stmt->is_pg) {
@@ -1249,7 +1245,7 @@ static int my_sqlite3_reset(sqlite3_stmt *pStmt) {
     pg_stmt_t *pg_stmt = pg_find_any_stmt(pStmt);
     if (pg_stmt) {
         for (int i = 0; i < MAX_PARAMS; i++) {
-            if (pg_stmt->param_values[i]) {
+            if (pg_stmt->param_values[i] && !is_preallocated_buffer(pg_stmt, i)) {
                 free(pg_stmt->param_values[i]);
                 pg_stmt->param_values[i] = NULL;
             }
@@ -1280,7 +1276,7 @@ static int my_sqlite3_clear_bindings(sqlite3_stmt *pStmt) {
     pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
     if (pg_stmt) {
         for (int i = 0; i < MAX_PARAMS; i++) {
-            if (pg_stmt->param_values[i]) {
+            if (pg_stmt->param_values[i] && !is_preallocated_buffer(pg_stmt, i)) {
                 free(pg_stmt->param_values[i]);
                 pg_stmt->param_values[i] = NULL;
             }
@@ -1426,37 +1422,60 @@ static double my_sqlite3_column_double(sqlite3_stmt *pStmt, int idx) {
 static const unsigned char* my_sqlite3_column_text(sqlite3_stmt *pStmt, int idx) {
     pg_stmt_t *pg_stmt = pg_find_any_stmt(pStmt);
     if (pg_stmt && pg_stmt->is_pg == 2 && pg_stmt->result) {
-        if (idx < 0 || idx >= pg_stmt->num_cols) {
+        pthread_mutex_lock(&pg_stmt->mutex);
+
+        if (idx < 0 || idx >= pg_stmt->num_cols || idx >= MAX_PARAMS) {
             LOG_ERROR("COL_TEXT_BOUNDS: idx=%d out of bounds (num_cols=%d) sql=%.100s",
                      idx, pg_stmt->num_cols, pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
+            pthread_mutex_unlock(&pg_stmt->mutex);
             return NULL;
         }
         int row = pg_stmt->current_row;
         if (row < 0 || row >= pg_stmt->num_rows) {
             LOG_ERROR("COL_TEXT_ROW_BOUNDS: row=%d out of bounds (num_rows=%d)", row, pg_stmt->num_rows);
+            pthread_mutex_unlock(&pg_stmt->mutex);
             return NULL;
         }
         if (!PQgetisnull(pg_stmt->result, row, idx)) {
-            const unsigned char* value = (const unsigned char*)PQgetvalue(pg_stmt->result, row, idx);
+            // Check if we already have this value cached for the current row
+            if (pg_stmt->cached_row == row && pg_stmt->cached_text[idx]) {
+                const unsigned char *result = (const unsigned char*)pg_stmt->cached_text[idx];
+                pthread_mutex_unlock(&pg_stmt->mutex);
+                return result;
+            }
 
-            // DEBUG: Log if we're returning "folder" to help debug metadata_type issue
-            if (value && strcmp((const char*)value, "folder") == 0) {
-                const char *col_name = PQfname(pg_stmt->result, idx);
-                LOG_ERROR("FOLDER_DEBUG: Returning 'folder' for column '%s' (idx=%d, row=%d)",
-                         col_name ? col_name : "unknown", idx, row);
-                LOG_ERROR("FOLDER_DEBUG: SQL was: %s", pg_stmt->pg_sql ? pg_stmt->pg_sql : "unknown");
+            // Clear cache if row changed
+            if (pg_stmt->cached_row != row) {
+                for (int i = 0; i < MAX_PARAMS; i++) {
+                    if (pg_stmt->cached_text[i]) {
+                        free(pg_stmt->cached_text[i]);
+                        pg_stmt->cached_text[i] = NULL;
+                    }
+                    if (pg_stmt->cached_blob[i]) {
+                        free(pg_stmt->cached_blob[i]);
+                        pg_stmt->cached_blob[i] = NULL;
+                        pg_stmt->cached_blob_len[i] = 0;
+                    }
+                }
+                pg_stmt->cached_row = row;
+            }
 
-                // Log all columns in this row for context
-                LOG_ERROR("FOLDER_DEBUG: Row dump:");
-                for (int i = 0; i < pg_stmt->num_cols; i++) {
-                    const char *cn = PQfname(pg_stmt->result, i);
-                    const char *cv = PQgetisnull(pg_stmt->result, row, i) ? "NULL" : PQgetvalue(pg_stmt->result, row, i);
-                    LOG_ERROR("  [%d] %s = %s", i, cn ? cn : "?", cv);
+            // Get value from PostgreSQL and cache it
+            const char* pg_value = PQgetvalue(pg_stmt->result, row, idx);
+            if (pg_value) {
+                pg_stmt->cached_text[idx] = strdup(pg_value);
+                if (!pg_stmt->cached_text[idx]) {
+                    LOG_ERROR("COL_TEXT: strdup failed for column %d", idx);
+                    pthread_mutex_unlock(&pg_stmt->mutex);
+                    return NULL;
                 }
             }
 
-            return value;
+            const unsigned char *result = (const unsigned char*)pg_stmt->cached_text[idx];
+            pthread_mutex_unlock(&pg_stmt->mutex);
+            return result;
         }
+        pthread_mutex_unlock(&pg_stmt->mutex);
         return NULL;
     }
     return sqlite3_column_text(pStmt, idx);
@@ -1509,15 +1528,36 @@ static const void* pg_decode_bytea(pg_stmt_t *pg_stmt, int row, int col, int *ou
         return NULL;
     }
 
-    // Decode hex to binary
+    // Inline hex decode - 4-10x faster than sscanf
+    // Lookup table for hex digit values (255 = invalid)
+    static const unsigned char hex_lut[256] = {
+        255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+        255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+        255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+        0,1,2,3,4,5,6,7,8,9,255,255,255,255,255,255,  // 0-9
+        255,10,11,12,13,14,15,255,255,255,255,255,255,255,255,255,  // A-F
+        255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+        255,10,11,12,13,14,15,255,255,255,255,255,255,255,255,255,  // a-f
+        255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+        255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+        255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+        255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+        255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+        255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+        255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+        255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+        255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255
+    };
+
     for (size_t i = 0; i < bin_len; i++) {
-        unsigned int byte;
-        if (sscanf(&hex_str[i * 2], "%2x", &byte) != 1) {
+        unsigned char hi = hex_lut[(unsigned char)hex_str[i * 2]];
+        unsigned char lo = hex_lut[(unsigned char)hex_str[i * 2 + 1]];
+        if (hi == 255 || lo == 255) {
             free(binary);
             *out_length = 0;
             return NULL;
         }
-        binary[i] = (unsigned char)byte;
+        binary[i] = (hi << 4) | lo;
     }
 
     // Cache the decoded data
@@ -1531,9 +1571,17 @@ static const void* pg_decode_bytea(pg_stmt_t *pg_stmt, int row, int col, int *ou
 static const void* my_sqlite3_column_blob(sqlite3_stmt *pStmt, int idx) {
     pg_stmt_t *pg_stmt = pg_find_any_stmt(pStmt);
     if (pg_stmt && pg_stmt->is_pg == 2 && pg_stmt->result) {
-        if (idx < 0 || idx >= pg_stmt->num_cols) return NULL;
+        pthread_mutex_lock(&pg_stmt->mutex);
+
+        if (idx < 0 || idx >= pg_stmt->num_cols || idx >= MAX_PARAMS) {
+            pthread_mutex_unlock(&pg_stmt->mutex);
+            return NULL;
+        }
         int row = pg_stmt->current_row;
-        if (row < 0 || row >= pg_stmt->num_rows) return NULL;
+        if (row < 0 || row >= pg_stmt->num_rows) {
+            pthread_mutex_unlock(&pg_stmt->mutex);
+            return NULL;
+        }
         if (!PQgetisnull(pg_stmt->result, row, idx)) {
             // Check if this is a BYTEA column (OID 17)
             Oid col_type = PQftype(pg_stmt->result, idx);
@@ -1541,10 +1589,54 @@ static const void* my_sqlite3_column_blob(sqlite3_stmt *pStmt, int idx) {
             LOG_DEBUG("column_blob called: col=%d name=%s type=%d row=%d", idx, col_name ? col_name : "?", col_type, row);
             if (col_type == 17) {  // BYTEA
                 int blob_len;
-                return pg_decode_bytea(pg_stmt, row, idx, &blob_len);
+                const void *result = pg_decode_bytea(pg_stmt, row, idx, &blob_len);
+                pthread_mutex_unlock(&pg_stmt->mutex);
+                return result;
             }
-            return PQgetvalue(pg_stmt->result, row, idx);
+
+            // For non-BYTEA, cache the raw blob data to ensure pointer validity
+            // Check if we already have this value cached for the current row
+            if (pg_stmt->cached_row == row && pg_stmt->cached_blob[idx]) {
+                const void *result = pg_stmt->cached_blob[idx];
+                pthread_mutex_unlock(&pg_stmt->mutex);
+                return result;
+            }
+
+            // Clear cache if row changed
+            if (pg_stmt->cached_row != row) {
+                for (int i = 0; i < MAX_PARAMS; i++) {
+                    if (pg_stmt->cached_text[i]) {
+                        free(pg_stmt->cached_text[i]);
+                        pg_stmt->cached_text[i] = NULL;
+                    }
+                    if (pg_stmt->cached_blob[i]) {
+                        free(pg_stmt->cached_blob[i]);
+                        pg_stmt->cached_blob[i] = NULL;
+                        pg_stmt->cached_blob_len[i] = 0;
+                    }
+                }
+                pg_stmt->cached_row = row;
+            }
+
+            // Cache the blob data
+            int blob_len = PQgetlength(pg_stmt->result, row, idx);
+            const char *pg_value = PQgetvalue(pg_stmt->result, row, idx);
+            if (pg_value && blob_len > 0) {
+                pg_stmt->cached_blob[idx] = malloc(blob_len);
+                if (pg_stmt->cached_blob[idx]) {
+                    memcpy(pg_stmt->cached_blob[idx], pg_value, blob_len);
+                    pg_stmt->cached_blob_len[idx] = blob_len;
+                } else {
+                    LOG_ERROR("COL_BLOB: malloc failed for column %d, len %d", idx, blob_len);
+                    pthread_mutex_unlock(&pg_stmt->mutex);
+                    return NULL;
+                }
+            }
+            const void *result = pg_stmt->cached_blob[idx];
+            pthread_mutex_unlock(&pg_stmt->mutex);
+            return result;
         }
+        pthread_mutex_unlock(&pg_stmt->mutex);
         return NULL;
     }
     return sqlite3_column_blob(pStmt, idx);
@@ -1553,9 +1645,17 @@ static const void* my_sqlite3_column_blob(sqlite3_stmt *pStmt, int idx) {
 static int my_sqlite3_column_bytes(sqlite3_stmt *pStmt, int idx) {
     pg_stmt_t *pg_stmt = pg_find_any_stmt(pStmt);
     if (pg_stmt && pg_stmt->is_pg == 2 && pg_stmt->result) {
-        if (idx < 0 || idx >= pg_stmt->num_cols) return 0;
+        pthread_mutex_lock(&pg_stmt->mutex);
+
+        if (idx < 0 || idx >= pg_stmt->num_cols) {
+            pthread_mutex_unlock(&pg_stmt->mutex);
+            return 0;
+        }
         int row = pg_stmt->current_row;
-        if (row < 0 || row >= pg_stmt->num_rows) return 0;
+        if (row < 0 || row >= pg_stmt->num_rows) {
+            pthread_mutex_unlock(&pg_stmt->mutex);
+            return 0;
+        }
         if (!PQgetisnull(pg_stmt->result, row, idx)) {
             // Check if this is a BYTEA column (OID 17)
             Oid col_type = PQftype(pg_stmt->result, idx);
@@ -1563,10 +1663,14 @@ static int my_sqlite3_column_bytes(sqlite3_stmt *pStmt, int idx) {
                 // Decode the blob (caches it) and return the decoded length
                 int blob_len;
                 pg_decode_bytea(pg_stmt, row, idx, &blob_len);
+                pthread_mutex_unlock(&pg_stmt->mutex);
                 return blob_len;
             }
-            return PQgetlength(pg_stmt->result, row, idx);
+            int len = PQgetlength(pg_stmt->result, row, idx);
+            pthread_mutex_unlock(&pg_stmt->mutex);
+            return len;
         }
+        pthread_mutex_unlock(&pg_stmt->mutex);
         return 0;
     }
     return sqlite3_column_bytes(pStmt, idx);

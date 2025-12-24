@@ -29,7 +29,7 @@ typedef struct stmt_entry {
 static stmt_entry_t *stmt_hash[HASH_BUCKETS];  // Hash table buckets
 static stmt_entry_t stmt_pool[MAX_STATEMENTS]; // Pre-allocated entries
 static int stmt_pool_next = 0;
-static pthread_mutex_t stmt_map_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_rwlock_t stmt_map_rwlock = PTHREAD_RWLOCK_INITIALIZER;
 
 // Simple hash function for pointers
 static inline unsigned int hash_ptr(void *ptr) {
@@ -42,11 +42,10 @@ static pthread_key_t cached_stmts_key;
 static pthread_once_t cached_stmts_key_once = PTHREAD_ONCE_INIT;
 static volatile int cached_stmts_key_valid = 0;
 
-// Fake sqlite3_value pool
+// Fake sqlite3_value pool (lock-free with atomic index)
 #define MAX_PG_VALUES 4096
 static pg_value_t pg_values[MAX_PG_VALUES];
-static int pg_value_idx = 0;
-static pthread_mutex_t pg_value_mutex = PTHREAD_MUTEX_INITIALIZER;
+static atomic_int pg_value_idx = 0;
 
 static volatile int statement_initialized = 0;
 static pthread_once_t statement_init_once = PTHREAD_ONCE_INIT;
@@ -113,7 +112,7 @@ void pg_statement_init(void) {
 }
 
 void pg_statement_cleanup(void) {
-    pthread_mutex_lock(&stmt_map_mutex);
+    pthread_rwlock_wrlock(&stmt_map_rwlock);
     for (int i = 0; i < stmt_pool_next; i++) {
         if (stmt_pool[i].pg_stmt) {
             pg_stmt_free(stmt_pool[i].pg_stmt);
@@ -122,7 +121,7 @@ void pg_statement_cleanup(void) {
     memset(stmt_hash, 0, sizeof(stmt_hash));
     memset(stmt_pool, 0, sizeof(stmt_pool));
     stmt_pool_next = 0;
-    pthread_mutex_unlock(&stmt_map_mutex);
+    pthread_rwlock_unlock(&stmt_map_rwlock);
     statement_initialized = 0;
 }
 
@@ -133,11 +132,11 @@ void pg_statement_cleanup(void) {
 void pg_register_stmt(sqlite3_stmt *sqlite_stmt, pg_stmt_t *pg_stmt) {
     if (!sqlite_stmt || !pg_stmt) return;
 
-    pthread_mutex_lock(&stmt_map_mutex);
+    pthread_rwlock_wrlock(&stmt_map_rwlock);
 
     // Get a free entry from the pool
     if (stmt_pool_next >= MAX_STATEMENTS) {
-        pthread_mutex_unlock(&stmt_map_mutex);
+        pthread_rwlock_unlock(&stmt_map_rwlock);
         LOG_ERROR("Statement pool full! MAX_STATEMENTS=%d", MAX_STATEMENTS);
         return;
     }
@@ -151,13 +150,13 @@ void pg_register_stmt(sqlite3_stmt *sqlite_stmt, pg_stmt_t *pg_stmt) {
     entry->next = stmt_hash[bucket];
     stmt_hash[bucket] = entry;
 
-    pthread_mutex_unlock(&stmt_map_mutex);
+    pthread_rwlock_unlock(&stmt_map_rwlock);
 }
 
 void pg_unregister_stmt(sqlite3_stmt *sqlite_stmt) {
     if (!sqlite_stmt) return;
 
-    pthread_mutex_lock(&stmt_map_mutex);
+    pthread_rwlock_wrlock(&stmt_map_rwlock);
 
     unsigned int bucket = hash_ptr(sqlite_stmt);
     stmt_entry_t **prev = &stmt_hash[bucket];
@@ -175,13 +174,13 @@ void pg_unregister_stmt(sqlite3_stmt *sqlite_stmt) {
         entry = entry->next;
     }
 
-    pthread_mutex_unlock(&stmt_map_mutex);
+    pthread_rwlock_unlock(&stmt_map_rwlock);
 }
 
 pg_stmt_t* pg_find_stmt(sqlite3_stmt *stmt) {
     if (!stmt) return NULL;
 
-    pthread_mutex_lock(&stmt_map_mutex);
+    pthread_rwlock_rdlock(&stmt_map_rwlock);  // Read lock - multiple readers allowed
 
     unsigned int bucket = hash_ptr(stmt);
     stmt_entry_t *entry = stmt_hash[bucket];
@@ -189,13 +188,13 @@ pg_stmt_t* pg_find_stmt(sqlite3_stmt *stmt) {
     while (entry) {
         if (entry->sqlite_stmt == stmt) {
             pg_stmt_t *result = entry->pg_stmt;
-            pthread_mutex_unlock(&stmt_map_mutex);
+            pthread_rwlock_unlock(&stmt_map_rwlock);
             return result;
         }
         entry = entry->next;
     }
 
-    pthread_mutex_unlock(&stmt_map_mutex);
+    pthread_rwlock_unlock(&stmt_map_rwlock);
     return NULL;
 }
 
@@ -216,14 +215,14 @@ int pg_is_our_stmt(void *ptr) {
 
     // Note: This still needs O(n) scan since we're searching by pg_stmt, not sqlite_stmt
     // But it's called much less frequently than pg_find_stmt
-    pthread_mutex_lock(&stmt_map_mutex);
+    pthread_rwlock_rdlock(&stmt_map_rwlock);  // Read lock
     for (int i = 0; i < stmt_pool_next; i++) {
         if (stmt_pool[i].pg_stmt == ptr) {
-            pthread_mutex_unlock(&stmt_map_mutex);
+            pthread_rwlock_unlock(&stmt_map_rwlock);
             return 1;
         }
     }
-    pthread_mutex_unlock(&stmt_map_mutex);
+    pthread_rwlock_unlock(&stmt_map_rwlock);
     return 0;
 }
 
@@ -303,6 +302,7 @@ pg_stmt_t* pg_stmt_create(pg_connection_t *conn, const char *sql, sqlite3_stmt *
     pg_stmt_t *stmt = calloc(1, sizeof(pg_stmt_t));
     if (!stmt) return NULL;
 
+    pthread_mutex_init(&stmt->mutex, NULL);
     stmt->conn = conn;
     stmt->shadow_stmt = shadow_stmt;
     stmt->sql = sql ? strdup(sql) : NULL;
@@ -310,6 +310,12 @@ pg_stmt_t* pg_stmt_create(pg_connection_t *conn, const char *sql, sqlite3_stmt *
     stmt->write_executed = 0;  // Initialize write execution guard
 
     return stmt;
+}
+
+// Helper: check if param_value points to pre-allocated buffer
+static inline int is_preallocated_buffer(pg_stmt_t *stmt, int idx) {
+    return stmt->param_values[idx] >= stmt->param_buffers[idx] &&
+           stmt->param_values[idx] < stmt->param_buffers[idx] + 32;
 }
 
 void pg_stmt_free(pg_stmt_t *stmt) {
@@ -320,7 +326,10 @@ void pg_stmt_free(pg_stmt_t *stmt) {
     if (stmt->result) PQclear(stmt->result);
 
     for (int i = 0; i < stmt->param_count; i++) {
-        if (stmt->param_values[i]) free(stmt->param_values[i]);
+        // Only free if not pointing to pre-allocated buffer
+        if (stmt->param_values[i] && !is_preallocated_buffer(stmt, i)) {
+            free(stmt->param_values[i]);
+        }
     }
 
     // Free parameter names (for named parameter mapping)
@@ -339,6 +348,19 @@ void pg_stmt_free(pg_stmt_t *stmt) {
         }
     }
 
+    // Free cached text/blob values
+    for (int i = 0; i < MAX_PARAMS; i++) {
+        if (stmt->cached_text[i]) {
+            free(stmt->cached_text[i]);
+            stmt->cached_text[i] = NULL;
+        }
+        if (stmt->cached_blob[i]) {
+            free(stmt->cached_blob[i]);
+            stmt->cached_blob[i] = NULL;
+        }
+    }
+
+    pthread_mutex_destroy(&stmt->mutex);
     free(stmt);
 }
 
@@ -362,6 +384,20 @@ void pg_stmt_clear_result(pg_stmt_t *stmt) {
         }
     }
     stmt->decoded_blob_row = -1;
+
+    // Clear cached text/blob values (these must persist until step/reset/finalize)
+    for (int i = 0; i < MAX_PARAMS; i++) {
+        if (stmt->cached_text[i]) {
+            free(stmt->cached_text[i]);
+            stmt->cached_text[i] = NULL;
+        }
+        if (stmt->cached_blob[i]) {
+            free(stmt->cached_blob[i]);
+            stmt->cached_blob[i] = NULL;
+            stmt->cached_blob_len[i] = 0;
+        }
+    }
+    stmt->cached_row = -1;
 }
 
 // ============================================================================
@@ -448,8 +484,9 @@ int pg_oid_to_sqlite_type(Oid oid) {
 }
 
 sqlite3_value* pg_create_column_value(pg_stmt_t *stmt, int col_idx) {
-    pthread_mutex_lock(&pg_value_mutex);
-    pg_value_t *pv = &pg_values[pg_value_idx++ % MAX_PG_VALUES];
+    // Lock-free slot allocation using atomic increment
+    int slot = atomic_fetch_add(&pg_value_idx, 1) & (MAX_PG_VALUES - 1);
+    pg_value_t *pv = &pg_values[slot];
 
     pv->magic = PG_VALUE_MAGIC;
     pv->stmt = stmt;
@@ -464,7 +501,6 @@ sqlite3_value* pg_create_column_value(pg_stmt_t *stmt, int col_idx) {
         pv->type = pg_oid_to_sqlite_type(PQftype(stmt->result, col_idx));
     }
 
-    pthread_mutex_unlock(&pg_value_mutex);
     return (sqlite3_value*)pv;
 }
 

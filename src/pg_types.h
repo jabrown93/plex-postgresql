@@ -9,6 +9,7 @@
 #include <sqlite3.h>
 #include <libpq-fe.h>
 #include <pthread.h>
+#include <stdatomic.h>
 
 // ============================================================================
 // Constants
@@ -73,6 +74,7 @@ typedef struct pg_connection {
 // ============================================================================
 
 typedef struct pg_stmt {
+    pthread_mutex_t mutex;           // Protect against concurrent access from multiple threads
     pg_connection_t *conn;
     sqlite3_stmt *shadow_stmt;       // Real SQLite statement handle (for mapping)
     char *sql;                       // Original SQL
@@ -91,11 +93,19 @@ typedef struct pg_stmt {
     int param_formats[MAX_PARAMS];   // 0 = text, 1 = binary
     int param_count;
     char **param_names;              // Named parameter names (for mapping :name to $N)
+    char param_buffers[MAX_PARAMS][32]; // Pre-allocated buffers for int/double (avoid malloc)
 
     // Decoded BYTEA blob cache (per-row, freed on step/reset)
     void *decoded_blobs[MAX_PARAMS]; // Decoded binary data per column
     int decoded_blob_lens[MAX_PARAMS]; // Length of decoded data per column
     int decoded_blob_row;            // Row for which blobs are cached (-1 = none)
+
+    // Cached text/blob values to ensure pointer validity per SQLite contract
+    // These remain valid until step()/reset()/finalize()
+    char *cached_text[MAX_PARAMS];   // Cached strdup'd text per column
+    void *cached_blob[MAX_PARAMS];   // Cached blob data per column
+    int cached_blob_len[MAX_PARAMS]; // Length of cached blob per column
+    int cached_row;                  // Row for which values are cached (-1 = none)
 } pg_stmt_t;
 
 // ============================================================================

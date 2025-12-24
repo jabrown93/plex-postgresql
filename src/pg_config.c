@@ -25,22 +25,23 @@ static const char *REDIRECT_PATTERNS[] = {
 };
 
 // SQLite-specific commands to skip (no-op, return success)
-static const char *SQLITE_SKIP_PATTERNS[] = {
-    "icu_load_collation",
-    "fts3_tokenizer",
-    "SELECT load_extension",
-    "VACUUM",
-    "PRAGMA",
-    "REINDEX",
-    "ANALYZE sqlite_",
-    "ATTACH DATABASE",
-    "DETACH DATABASE",
-    "BEGIN",
-    "COMMIT",
-    "ROLLBACK",
-    "SAVEPOINT",
-    "RELEASE SAVEPOINT",
-    NULL
+// Pre-computed lengths to avoid strlen() in hot path
+static const struct { const char *pattern; size_t len; } SQLITE_SKIP_PATTERNS[] = {
+    {"icu_load_collation", 18},
+    {"fts3_tokenizer", 14},
+    {"SELECT load_extension", 21},
+    {"VACUUM", 6},
+    {"PRAGMA", 6},
+    {"REINDEX", 7},
+    {"ANALYZE sqlite_", 15},
+    {"ATTACH DATABASE", 15},
+    {"DETACH DATABASE", 15},
+    {"BEGIN", 5},
+    {"COMMIT", 6},
+    {"ROLLBACK", 8},
+    {"SAVEPOINT", 9},
+    {"RELEASE SAVEPOINT", 17},
+    {NULL, 0}
 };
 
 // Patterns that can appear anywhere in SQL (should skip)
@@ -118,8 +119,8 @@ int should_skip_sql(const char *sql) {
     while (*sql && (*sql == ' ' || *sql == '\t' || *sql == '\n')) sql++;
 
     // Check patterns that should match at start of SQL
-    for (int i = 0; SQLITE_SKIP_PATTERNS[i]; i++) {
-        if (strncasecmp(sql, SQLITE_SKIP_PATTERNS[i], strlen(SQLITE_SKIP_PATTERNS[i])) == 0) {
+    for (int i = 0; SQLITE_SKIP_PATTERNS[i].pattern; i++) {
+        if (strncasecmp(sql, SQLITE_SKIP_PATTERNS[i].pattern, SQLITE_SKIP_PATTERNS[i].len) == 0) {
             return 1;
         }
     }

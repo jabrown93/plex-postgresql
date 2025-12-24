@@ -55,14 +55,25 @@ char* str_replace_nocase(const char *str, const char *old, const char *new_str) 
 
     size_t old_len = strlen(old);
     size_t new_len = strlen(new_str);
-    size_t str_len = strlen(str);
 
-    // Find all occurrences (case insensitive)
-    char *result = malloc(str_len * 2 + new_len * 10 + 1);
+    // Count occurrences first (case insensitive)
+    int count = 0;
+    const char *p = str;
+    while ((p = strcasestr(p, old)) != NULL) {
+        count++;
+        p += old_len;
+    }
+
+    if (count == 0) return strdup(str);
+
+    // Allocate exact size needed
+    size_t str_len = strlen(str);
+    size_t result_len = str_len + count * ((ssize_t)new_len - (ssize_t)old_len) + 1;
+    char *result = malloc(result_len);
     if (!result) return NULL;
 
     char *out = result;
-    const char *p = str;
+    p = str;
 
     while (*p) {
         if (strncasecmp(p, old, old_len) == 0) {
@@ -78,22 +89,7 @@ char* str_replace_nocase(const char *str, const char *old, const char *new_str) 
     return result;
 }
 
-// ============================================================================
-// Skip Whitespace
-// ============================================================================
-
-const char* skip_ws(const char *p) {
-    while (*p && isspace(*p)) p++;
-    return p;
-}
-
-// ============================================================================
-// Check if Character is Part of Identifier
-// ============================================================================
-
-int is_ident_char(char c) {
-    return isalnum(c) || c == '_';
-}
+// Note: skip_ws() and is_ident_char() are now inline in sql_translator_internal.h
 
 // ============================================================================
 // Extract Function Argument (handles nested parentheses)

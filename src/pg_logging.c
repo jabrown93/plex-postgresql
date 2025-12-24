@@ -82,7 +82,7 @@ void pg_logging_cleanup(void) {
 }
 
 // ============================================================================
-// Core Logging
+// Core Logging (minimized mutex hold time)
 // ============================================================================
 
 void log_message(int level, const char *fmt, ...) {
@@ -90,32 +90,45 @@ void log_message(int level, const char *fmt, ...) {
     if (level > current_log_level) return;
     if (!log_file) return;
 
-    pthread_mutex_lock(&log_mutex);
-
-    time_t now = time(NULL);
-    struct tm *tm = localtime(&now);
+    // Format message BEFORE taking mutex to minimize contention
+    char buffer[4096];
+    int offset = 0;
 
     // Timestamp
-    fprintf(log_file, "[%04d-%02d-%02d %02d:%02d:%02d] ",
-            tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
-            tm->tm_hour, tm->tm_min, tm->tm_sec);
+    time_t now = time(NULL);
+    struct tm tm_buf;
+    struct tm *tm = localtime_r(&now, &tm_buf);  // Thread-safe version
+    offset += snprintf(buffer + offset, sizeof(buffer) - offset,
+                       "[%04d-%02d-%02d %02d:%02d:%02d] ",
+                       tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
+                       tm->tm_hour, tm->tm_min, tm->tm_sec);
 
     // Level tag
+    const char *tag;
     switch (level) {
-        case PG_LOG_ERROR: fprintf(log_file, "[ERROR] "); break;
-        case PG_LOG_INFO:  fprintf(log_file, "[INFO] "); break;
-        case PG_LOG_DEBUG: fprintf(log_file, "[DEBUG] "); break;
+        case PG_LOG_ERROR: tag = "[ERROR] "; break;
+        case PG_LOG_INFO:  tag = "[INFO] "; break;
+        case PG_LOG_DEBUG: tag = "[DEBUG] "; break;
+        default: tag = "[???] "; break;
     }
+    offset += snprintf(buffer + offset, sizeof(buffer) - offset, "%s", tag);
 
     // Message
     va_list args;
     va_start(args, fmt);
-    vfprintf(log_file, fmt, args);
+    offset += vsnprintf(buffer + offset, sizeof(buffer) - offset, fmt, args);
     va_end(args);
 
-    fprintf(log_file, "\n");
-    fflush(log_file);
+    // Newline
+    if (offset < (int)sizeof(buffer) - 1) {
+        buffer[offset++] = '\n';
+        buffer[offset] = '\0';
+    }
 
+    // Brief mutex hold for atomic write
+    pthread_mutex_lock(&log_mutex);
+    fputs(buffer, log_file);
+    fflush(log_file);
     pthread_mutex_unlock(&log_mutex);
 }
 

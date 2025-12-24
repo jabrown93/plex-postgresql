@@ -22,9 +22,22 @@
 
 char* str_replace(const char *str, const char *old, const char *new_str);
 char* str_replace_nocase(const char *str, const char *old, const char *new_str);
-const char* skip_ws(const char *p);
-int is_ident_char(char c);
 const char* extract_arg(const char *start, char *buf, size_t bufsize);
+
+// ============================================================================
+// Inline Hot-Path Helpers (avoid function call overhead)
+// ============================================================================
+
+static inline const char* skip_ws(const char *p) {
+    while (*p && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) p++;
+    return p;
+}
+
+static inline int is_ident_char(char c) {
+    // Fast path: check common ranges directly instead of calling isalnum()
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_';
+}
 
 // ============================================================================
 // Function Translations (sql_tr_functions.c)

@@ -10,18 +10,21 @@
 // Check if string starts with a SQL keyword
 // ============================================================================
 
-static int starts_with_keyword(const char *p) {
-    static const char *keywords[] = {
-        "from", "where", "join", "inner", "outer", "left", "right", "cross",
-        "on", "and", "or", "not", "in", "like", "between", "order", "group",
-        "having", "limit", "offset", "union", "except", "intersect", "as",
-        "into", "values", "set", "delete", "update", "insert", NULL
-    };
+// Pre-computed keyword lengths to avoid strlen() in loop
+static const struct { const char *word; size_t len; } keywords[] = {
+    {"from", 4}, {"where", 5}, {"join", 4}, {"inner", 5}, {"outer", 5},
+    {"left", 4}, {"right", 5}, {"cross", 5}, {"on", 2}, {"and", 3},
+    {"or", 2}, {"not", 3}, {"in", 2}, {"like", 4}, {"between", 7},
+    {"order", 5}, {"group", 5}, {"having", 6}, {"limit", 5}, {"offset", 6},
+    {"union", 5}, {"except", 6}, {"intersect", 9}, {"as", 2}, {"into", 4},
+    {"values", 6}, {"set", 3}, {"delete", 6}, {"update", 6}, {"insert", 6},
+    {NULL, 0}
+};
 
-    for (int i = 0; keywords[i]; i++) {
-        size_t len = strlen(keywords[i]);
-        if (strncasecmp(p, keywords[i], len) == 0) {
-            char next = p[len];
+static int starts_with_keyword(const char *p) {
+    for (int i = 0; keywords[i].word; i++) {
+        if (strncasecmp(p, keywords[i].word, keywords[i].len) == 0) {
+            char next = p[keywords[i].len];
             if (next == '\0' || next == ' ' || next == '\t' || next == '\n' ||
                 next == '(' || next == ')' || next == ',') {
                 return 1;

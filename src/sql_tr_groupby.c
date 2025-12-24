@@ -24,12 +24,13 @@ typedef struct {
     int is_alias;                // 1 if this is an alias name
 } column_ref_t;
 
-// Aggregate function names
-static const char *AGGREGATE_FUNCS[] = {
-    "count", "sum", "avg", "max", "min", "group_concat",
-    "string_agg", "array_agg", "bool_and", "bool_or",
-    "every", "json_agg", "jsonb_agg", "xmlagg",
-    NULL
+// Aggregate function names with pre-computed lengths
+static const struct { const char *name; size_t len; } AGGREGATE_FUNCS[] = {
+    {"count", 5}, {"sum", 3}, {"avg", 3}, {"max", 3}, {"min", 3},
+    {"group_concat", 12}, {"string_agg", 10}, {"array_agg", 9},
+    {"bool_and", 8}, {"bool_or", 7}, {"every", 5},
+    {"json_agg", 8}, {"jsonb_agg", 9}, {"xmlagg", 6},
+    {NULL, 0}
 };
 
 // ============================================================================
@@ -37,9 +38,8 @@ static const char *AGGREGATE_FUNCS[] = {
 // ============================================================================
 
 static int is_aggregate_func(const char *str, size_t len) {
-    for (int i = 0; AGGREGATE_FUNCS[i]; i++) {
-        size_t func_len = strlen(AGGREGATE_FUNCS[i]);
-        if (len == func_len && strncasecmp(str, AGGREGATE_FUNCS[i], len) == 0) {
+    for (int i = 0; AGGREGATE_FUNCS[i].name; i++) {
+        if (len == AGGREGATE_FUNCS[i].len && strncasecmp(str, AGGREGATE_FUNCS[i].name, len) == 0) {
             return 1;
         }
     }
@@ -458,21 +458,26 @@ char* fix_group_by_strict_complete(const char *sql) {
 
     // Copy prefix (everything up to end of current GROUP BY)
     memcpy(result, sql, prefix_len);
-    result[prefix_len] = '\0';
 
     // Trim any trailing whitespace from GROUP BY clause
     while (prefix_len > 0 && isspace(result[prefix_len - 1])) {
-        result[--prefix_len] = '\0';
+        prefix_len--;
     }
+
+    // Use pointer to track position - O(n) instead of O(n²) strcat
+    char *p = result + prefix_len;
 
     // Append missing columns
     for (int i = 0; i < missing_count; i++) {
-        strcat(result, ",");
-        strcat(result, missing_cols[i].name);
+        *p++ = ',';
+        size_t name_len = strlen(missing_cols[i].name);
+        memcpy(p, missing_cols[i].name, name_len);
+        p += name_len;
     }
 
     // Append suffix (rest of query)
-    strcat(result, group_by_end);
+    size_t suffix_actual_len = strlen(group_by_end);
+    memcpy(p, group_by_end, suffix_actual_len + 1);  // +1 for null terminator
 
     LOG_INFO("GROUP_BY_REWRITER: Added %d missing columns to GROUP BY", missing_count);
 
