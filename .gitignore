@@ -35,3 +35,4 @@ scanner_wrapper
 # Backup files
 *.backup
 *.bak
+postgresql-15.3/
