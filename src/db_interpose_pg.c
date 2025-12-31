@@ -60,7 +60,7 @@ typedef struct {
 // Pool of fake values (one per column, reused)
 #define MAX_FAKE_VALUES 256
 static pg_fake_value_t fake_value_pool[MAX_FAKE_VALUES];
-static int fake_value_next = 0;
+static unsigned int fake_value_next = 0;  // MUST be unsigned to prevent negative index after overflow!
 static pthread_mutex_t fake_value_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // Check if a pointer is one of our fake values
@@ -1858,7 +1858,8 @@ static sqlite3_value* my_sqlite3_column_value(sqlite3_stmt *pStmt, int idx) {
 
         // Return a fake value from our pool (thread-safe)
         pthread_mutex_lock(&fake_value_mutex);
-        int slot = fake_value_next++ % MAX_FAKE_VALUES;
+        // Use bitmask instead of modulo - always produces 0-255 even after overflow
+        unsigned int slot = (fake_value_next++) & 0xFF;
         pg_fake_value_t *fake = &fake_value_pool[slot];
         fake->magic = PG_FAKE_VALUE_MAGIC;
         fake->pg_stmt = pg_stmt;

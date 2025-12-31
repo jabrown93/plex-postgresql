@@ -189,6 +189,10 @@ pg_connection_t* pg_find_connection(sqlite3 *db) {
                     pthread_mutex_unlock(&pool_mutex);
                     return pool_conn;
                 }
+                // Pool is full - return NULL to fall back to SQLite
+                // DO NOT return handle_conn as it has no real PG connection
+                LOG_DEBUG("Pool full for library.db, falling back to SQLite");
+                return NULL;
             }
             return handle_conn;
         }
@@ -310,6 +314,15 @@ static pg_connection_t* create_pool_connection(const char *db_path) {
             LOG_ERROR("Failed to set search_path: %s", err);
         }
         if (res) PQclear(res);
+
+        // Set statement_timeout to prevent infinite hangs on PostgreSQL lock contention
+        // 10 seconds is long enough for complex queries but fails fast under heavy load
+        res = PQexec(conn->conn, "SET statement_timeout = '10s'");
+        if (PQresultStatus(res) != PGRES_COMMAND_OK) {
+            LOG_ERROR("Failed to set statement_timeout: %s", PQresultErrorMessage(res));
+        }
+        if (res) PQclear(res);
+
         conn->is_pg_active = 1;
     }
 
@@ -346,6 +359,10 @@ static pg_connection_t* do_slot_reconnect(int slot_idx) {
         char schema_cmd[256];
         snprintf(schema_cmd, sizeof(schema_cmd), "SET search_path TO %s, public", cfg->schema);
         PGresult *res = PQexec(new_pg_conn, schema_cmd);
+        PQclear(res);
+
+        // Set statement_timeout to prevent infinite hangs
+        res = PQexec(new_pg_conn, "SET statement_timeout = '10s'");
         PQclear(res);
 
         conn->conn = new_pg_conn;
@@ -392,6 +409,9 @@ static pg_connection_t* pool_get_connection(const char *db_path) {
 
             pg_connection_t *conn = library_pool[i].conn;
             if (conn && conn->conn && PQstatus(conn->conn) == CONNECTION_OK) {
+                // Connection looks healthy - use it directly
+                // Note: We don't drain stale results here as it can crash on corrupted connections
+                // If there are stale results, the next query will fail and trigger reconnect
                 library_pool[i].last_used = now;
                 return conn;
             }
@@ -424,14 +444,29 @@ static pg_connection_t* pool_get_connection(const char *db_path) {
 
             pg_connection_t *conn = library_pool[i].conn;
 
-            // Check if existing connection is still healthy
-            if (conn && conn->conn && PQstatus(conn->conn) == CONNECTION_OK) {
-                LOG_DEBUG("Pool: reusing existing connection in slot %d", i);
-                atomic_store(&library_pool[i].state, SLOT_READY);
-                return conn;
+            // When reusing another thread's connection, use PQreset() to ensure clean state
+            // This is safer than trying to drain stale results which can crash
+            if (conn && conn->conn) {
+                LOG_DEBUG("Pool: resetting connection in slot %d for reuse", i);
+                PQreset(conn->conn);
+
+                if (PQstatus(conn->conn) == CONNECTION_OK) {
+                    // Re-apply settings after reset
+                    pg_conn_config_t *cfg = pg_config_get();
+                    char schema_cmd[256];
+                    snprintf(schema_cmd, sizeof(schema_cmd), "SET search_path TO %s, public", cfg->schema);
+                    PGresult *res = PQexec(conn->conn, schema_cmd);
+                    PQclear(res);
+                    res = PQexec(conn->conn, "SET statement_timeout = '10s'");
+                    PQclear(res);
+
+                    LOG_DEBUG("Pool: reusing reset connection in slot %d", i);
+                    atomic_store(&library_pool[i].state, SLOT_READY);
+                    return conn;
+                }
             }
 
-            // Connection is dead - transition to RECONNECTING and fix it
+            // Connection reset failed - do full reconnect
             atomic_store(&library_pool[i].state, SLOT_RECONNECTING);
             return do_slot_reconnect(i);
         }
@@ -598,6 +633,16 @@ pg_connection_t* pg_connect(const char *db_path, sqlite3 *shadow_db) {
     conn->shadow_db = shadow_db;
     strncpy(conn->db_path, db_path ? db_path : "", sizeof(conn->db_path) - 1);
 
+    // For library.db, DON'T create a real PostgreSQL connection here.
+    // All queries will go through the connection pool via pg_find_connection().
+    // This prevents connection leaks where each sqlite3_open creates a new PG connection.
+    if (is_library_db(db_path)) {
+        conn->conn = NULL;  // No direct connection - pool handles it
+        conn->is_pg_active = 1;  // Mark as active so queries use the pool
+        LOG_INFO("PostgreSQL pool-only connection for: %s", db_path);
+        return conn;
+    }
+
     char conninfo[1024];
     snprintf(conninfo, sizeof(conninfo),
              "host=%s port=%d dbname=%s user=%s password=%s connect_timeout=5",
@@ -621,6 +666,13 @@ pg_connection_t* pg_connect(const char *db_path, sqlite3 *shadow_db) {
         if (PQresultStatus(res) != PGRES_COMMAND_OK) {
             const char *err = res ? PQresultErrorMessage(res) : "NULL result";
             LOG_ERROR("Failed to set search_path: %s", err);
+        }
+        if (res) PQclear(res);
+
+        // Set statement_timeout to prevent infinite hangs
+        res = PQexec(conn->conn, "SET statement_timeout = '10s'");
+        if (PQresultStatus(res) != PGRES_COMMAND_OK) {
+            LOG_ERROR("Failed to set statement_timeout: %s", PQresultErrorMessage(res));
         }
         if (res) PQclear(res);
 
@@ -682,6 +734,13 @@ int pg_ensure_connection(pg_connection_t *conn) {
     if (PQresultStatus(res) != PGRES_COMMAND_OK) {
         const char *err = res ? PQresultErrorMessage(res) : "NULL result";
         LOG_ERROR("Failed to set search_path on reconnect: %s", err);
+    }
+    if (res) PQclear(res);
+
+    // Set statement_timeout to prevent infinite hangs
+    res = PQexec(conn->conn, "SET statement_timeout = '10s'");
+    if (PQresultStatus(res) != PGRES_COMMAND_OK) {
+        LOG_ERROR("Failed to set statement_timeout on reconnect: %s", PQresultErrorMessage(res));
     }
     if (res) PQclear(res);
 
