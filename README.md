@@ -4,7 +4,9 @@
 
 This project provides a shim library that intercepts Plex's SQLite calls and redirects them to PostgreSQL, allowing you to use a more scalable and robust database backend with **99%+ query compatibility**.
 
-> **Platform support**: macOS (uses `DYLD_INTERPOSE`) and Linux (uses `LD_PRELOAD`). Docker support included for easy testing.
+> **Platform Status**:
+> - ✅ **macOS** - Fully working (uses `DYLD_INTERPOSE`)
+> - 🚧 **Linux** - Work in progress (uses `LD_PRELOAD`)
 
 ## Features
 
@@ -71,7 +73,9 @@ Intercepted functions:
 - Plex Media Server
 - Xcode Command Line Tools (`xcode-select --install`)
 
-### Linux
+### Linux (WIP)
+> ⚠️ Linux support is under development. The code compiles but has not been fully tested.
+
 - GCC and build tools
 - libpq-dev (PostgreSQL client library)
 - libsqlite3-dev
