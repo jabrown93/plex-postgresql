@@ -13,6 +13,7 @@
 #include <strings.h>
 #include <ctype.h>
 #include <dlfcn.h>
+#include <unistd.h>
 #include <sqlite3.h>
 #include <libpq-fe.h>
 
@@ -999,8 +1000,14 @@ static int my_sqlite3_step(sqlite3_stmt *pStmt) {
                                 (void*)pthread_self(), (void*)cached_exec_conn);
                     }
 
-                    // CRITICAL FIX: Lock connection mutex to prevent concurrent libpq access
-                    pthread_mutex_lock(&cached_exec_conn->mutex);
+                    // DEADLOCK FIX: Use trylock for connection mutex
+                    if (pthread_mutex_trylock(&cached_exec_conn->mutex) != 0) {
+                        LOG_DEBUG("CACHED WRITE: connection mutex contention, falling back to SQLite");
+                        if (insert_sql) free(insert_sql);
+                        sql_translation_free(&trans);
+                        if (expanded_sql) sqlite3_free(expanded_sql);
+                        return sqlite3_step(pStmt);
+                    }
                     PGresult *res = PQexec(cached_exec_conn->conn, exec_sql);
                     ExecStatusType status = PQresultStatus(res);
 
@@ -1098,8 +1105,13 @@ static int my_sqlite3_step(sqlite3_stmt *pStmt) {
                             }
                         }
                         if (new_stmt) {
-                            // CRITICAL FIX: Lock connection mutex to prevent concurrent libpq access
-                            pthread_mutex_lock(&cached_read_conn->mutex);
+                            // DEADLOCK FIX: Use trylock for connection mutex
+                            if (pthread_mutex_trylock(&cached_read_conn->mutex) != 0) {
+                                LOG_DEBUG("CACHED READ: connection mutex contention, falling back to SQLite");
+                                sql_translation_free(&trans);
+                                if (expanded_sql) sqlite3_free(expanded_sql);
+                                return sqlite3_step(pStmt);
+                            }
                             new_stmt->result = PQexec(cached_read_conn->conn, trans.sql);
                             if (PQresultStatus(new_stmt->result) == PGRES_TUPLES_OK) {
                                 new_stmt->num_rows = PQntuples(new_stmt->result);
@@ -1149,8 +1161,13 @@ static int my_sqlite3_step(sqlite3_stmt *pStmt) {
     }
 
     if (pg_stmt && pg_stmt->pg_sql && exec_conn && exec_conn->conn) {
-        // Lock mutex to protect against concurrent access from multiple threads
-        pthread_mutex_lock(&pg_stmt->mutex);
+        // DEADLOCK FIX: Use trylock instead of blocking lock
+        // If another thread is using this statement, fall back to SQLite
+        // This prevents the deadlock where 40+ threads block waiting for one mutex
+        if (pthread_mutex_trylock(&pg_stmt->mutex) != 0) {
+            LOG_DEBUG("STEP: mutex contention on pg_stmt %p, falling back to SQLite", (void*)pg_stmt);
+            return sqlite3_step(pStmt);
+        }
 
         const char *paramValues[MAX_PARAMS] = {NULL};  // Initialize to prevent garbage access
         for (int i = 0; i < pg_stmt->param_count && i < MAX_PARAMS; i++) {
@@ -1170,16 +1187,16 @@ static int my_sqlite3_step(sqlite3_stmt *pStmt) {
                     for (int i = 0; i < pg_stmt->param_count && i < 5; i++) {
                         LOG_INFO("  PARAM[%d] = %s", i+1, paramValues[i] ? paramValues[i] : "NULL");
                     }
-                    // Debug: check search_path
+                    // Debug: check search_path (use trylock to avoid deadlock)
                     if (pg_stmt->pg_sql && strstr(pg_stmt->pg_sql, "directories")) {
-                        // CRITICAL FIX: Lock connection mutex to prevent concurrent libpq access
-                        pthread_mutex_lock(&exec_conn->mutex);
-                        PGresult *sp = PQexec(exec_conn->conn, "SHOW search_path");
-                        if (PQresultStatus(sp) == PGRES_TUPLES_OK && PQntuples(sp) > 0) {
-                            LOG_INFO("  search_path = %s", PQgetvalue(sp, 0, 0));
+                        if (pthread_mutex_trylock(&exec_conn->mutex) == 0) {
+                            PGresult *sp = PQexec(exec_conn->conn, "SHOW search_path");
+                            if (PQresultStatus(sp) == PGRES_TUPLES_OK && PQntuples(sp) > 0) {
+                                LOG_INFO("  search_path = %s", PQgetvalue(sp, 0, 0));
+                            }
+                            PQclear(sp);
+                            pthread_mutex_unlock(&exec_conn->mutex);
                         }
-                        PQclear(sp);
-                        pthread_mutex_unlock(&exec_conn->mutex);
                     }
                 }
 
@@ -1195,9 +1212,13 @@ static int my_sqlite3_step(sqlite3_stmt *pStmt) {
                     return SQLITE_ERROR;
                 }
 
-                // CRITICAL FIX: Lock connection mutex to prevent concurrent libpq access
-                // libpq is not thread-safe when sharing PGconn between threads
-                pthread_mutex_lock(&exec_conn->mutex);
+                // DEADLOCK FIX: Use trylock for connection mutex too
+                // If another operation is using this connection, fall back to SQLite
+                if (pthread_mutex_trylock(&exec_conn->mutex) != 0) {
+                    LOG_DEBUG("STEP READ: connection mutex contention, falling back to SQLite");
+                    pthread_mutex_unlock(&pg_stmt->mutex);
+                    return sqlite3_step(pStmt);
+                }
                 pg_stmt->result = PQexecParams(exec_conn->conn, pg_stmt->pg_sql,
                     pg_stmt->param_count, NULL, paramValues, NULL, NULL, 0);
                 pthread_mutex_unlock(&exec_conn->mutex);
@@ -1308,8 +1329,24 @@ static int my_sqlite3_step(sqlite3_stmt *pStmt) {
                 return SQLITE_ERROR;
             }
 
-            // CRITICAL FIX: Lock connection mutex to prevent concurrent libpq access
-            pthread_mutex_lock(&exec_conn->mutex);
+            // DEADLOCK FIX: Use trylock for connection mutex
+            // For WRITES, we can't fall back to SQLite (data consistency)
+            // Retry a few times before giving up
+            int got_lock = 0;
+            for (int retry = 0; retry < 10; retry++) {
+                if (pthread_mutex_trylock(&exec_conn->mutex) == 0) {
+                    got_lock = 1;
+                    break;
+                }
+                usleep(1000);  // 1ms wait between retries
+            }
+            if (!got_lock) {
+                LOG_ERROR("STEP WRITE: connection mutex contention after 10 retries");
+                pg_stmt->write_executed = 1;
+                pthread_mutex_unlock(&pg_stmt->mutex);
+                return SQLITE_BUSY;
+            }
+
             PGresult *res = PQexecParams(exec_conn->conn, pg_stmt->pg_sql,
                 pg_stmt->param_count, NULL, paramValues, NULL, NULL, 0);
 
