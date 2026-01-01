@@ -146,7 +146,34 @@ char* translate_strftime(const char *sql) {
             // Translate based on format
             if (strcmp(format, "'%s'") == 0) {
                 // Unix timestamp
-                out += sprintf(out, "EXTRACT(EPOCH FROM %s)::bigint", value);
+                // Handle 'now' specially - convert to NOW()
+                if (strcasecmp(value, "'now'") == 0) {
+                    if (extra[0]) {
+                        // Parse interval modifier like '-1 day', '+7 hours'
+                        char interval[256] = {0};
+                        if (extra[0] == '\'') {
+                            strncpy(interval, extra + 1, sizeof(interval) - 1);
+                            char *q = strrchr(interval, '\'');
+                            if (q) *q = '\0';
+                        } else {
+                            strncpy(interval, extra, sizeof(interval) - 1);
+                        }
+                        // Convert SQLite interval format to PostgreSQL
+                        // '-1 day' -> '- INTERVAL '1 day''
+                        if (interval[0] == '-') {
+                            out += sprintf(out, "EXTRACT(EPOCH FROM NOW() - INTERVAL '%s')::bigint", interval + 1);
+                        } else if (interval[0] == '+') {
+                            out += sprintf(out, "EXTRACT(EPOCH FROM NOW() + INTERVAL '%s')::bigint", interval + 1);
+                        } else {
+                            out += sprintf(out, "EXTRACT(EPOCH FROM NOW() - INTERVAL '%s')::bigint", interval);
+                        }
+                    } else {
+                        out += sprintf(out, "EXTRACT(EPOCH FROM NOW())::bigint");
+                    }
+                } else {
+                    // Column or expression - use TO_TIMESTAMP for integer epoch values
+                    out += sprintf(out, "EXTRACT(EPOCH FROM TO_TIMESTAMP(%s))::bigint", value);
+                }
             } else if (strcmp(format, "'%Y-%m-%d'") == 0) {
                 out += sprintf(out, "TO_CHAR(%s, 'YYYY-MM-DD')", value);
             } else if (strcmp(format, "'%Y-%m-%d %H:%M:%S'") == 0) {

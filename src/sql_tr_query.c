@@ -786,8 +786,65 @@ char* fix_integer_text_mismatch(const char *sql) {
 char* fix_json_operator_on_text(const char *sql) {
     if (!sql) return NULL;
 
-    // Check if the query contains ->> operator with $.
-    if (!strstr(sql, "->>") || !strstr(sql, "'$.")) {
+    // Check if the query contains ->> operator
+    if (!strstr(sql, "->>")) {
+        return strdup(sql);
+    }
+
+    // Check for ->> with parameter ($N) - needs column::json cast
+    // Pattern: "column"->>$N or column->>$N
+    const char *param_pattern = strstr(sql, "->>$");
+    if (param_pattern) {
+        LOG_INFO("Fixing JSON ->> operator with parameter on TEXT columns");
+        char *result = malloc(strlen(sql) * 2 + 256);
+        if (!result) return NULL;
+
+        char *out = result;
+        const char *p = sql;
+
+        while (*p) {
+            // Look for pattern: "column"->>$N or column->>$N
+            if (strncmp(p, "->>$", 4) == 0) {
+                // Find the column name before ->>
+                const char *col_end = p;
+                const char *col_start = col_end - 1;
+
+                // Skip back past quotes if present
+                if (col_start >= sql && *col_start == '"') {
+                    col_start--;
+                    while (col_start >= sql && *col_start != '"') col_start--;
+                } else {
+                    // No quotes - find start of identifier
+                    while (col_start >= sql && (is_ident_char(*col_start) || *col_start == '.')) col_start--;
+                    col_start++;
+                }
+
+                // Rewrite: go back to col_start, output (column::json->>$N
+                // First, remove what we already output for the column
+                size_t col_len = col_end - col_start;
+                out -= col_len;  // Back up past the column we already copied
+
+                // Now output the fixed version
+                *out++ = '(';
+                memcpy(out, col_start, col_len);
+                out += col_len;
+                out += sprintf(out, "::json");
+
+                // Copy ->>$N
+                while (*p && (*p == '-' || *p == '>' || *p == '$' || isdigit(*p))) {
+                    *out++ = *p++;
+                }
+                *out++ = ')';
+                continue;
+            }
+            *out++ = *p++;
+        }
+        *out = '\0';
+        return result;
+    }
+
+    // Check for ->> with '$.key' pattern
+    if (!strstr(sql, "'$.")) {
         return strdup(sql);
     }
 
