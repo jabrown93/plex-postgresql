@@ -430,8 +430,18 @@ char* fix_group_by_strict_complete(const char *sql) {
         return strdup(sql);
     }
 
-    // Find FROM
-    const char *from_pos = strcasestr(select_pos + 6, " from ");
+    // Find FROM - skip subqueries by finding the main FROM clause
+    // Look for " from " that's not inside parentheses
+    const char *from_pos = NULL;
+    int paren_depth = 0;
+    for (const char *p = select_pos + 6; *p; p++) {
+        if (*p == '(') paren_depth++;
+        else if (*p == ')') paren_depth--;
+        else if (paren_depth == 0 && strncasecmp(p, " from ", 6) == 0) {
+            from_pos = p;
+            break;
+        }
+    }
     if (!from_pos) {
         return strdup(sql);
     }
@@ -463,6 +473,10 @@ char* fix_group_by_strict_complete(const char *sql) {
 
     // Parse existing GROUP BY columns
     int groupby_count = parse_group_by_columns(group_by_pos, group_by_end, groupby_cols, MAX_COLUMNS);
+
+    // Debug: log column counts
+    LOG_INFO("GROUP_BY_REWRITER: select_count=%d, groupby_count=%d, from_pos offset=%ld",
+              select_count, groupby_count, (long)(from_pos - select_pos));
 
     // Find columns missing from GROUP BY
     column_ref_t *missing_cols = calloc(MAX_COLUMNS, sizeof(column_ref_t));
