@@ -22,7 +22,7 @@
 // Connection Pool Configuration
 // ============================================================================
 
-// POOL_SIZE is defined in pg_types.h (30)
+// Pool size constants defined in pg_types.h (POOL_SIZE_MAX=100, POOL_SIZE_DEFAULT=50)
 
 typedef struct {
     pg_connection_t *conn;
@@ -42,9 +42,15 @@ static volatile int client_initialized = 0;
 static pthread_once_t client_init_once = PTHREAD_ONCE_INIT;
 
 // Connection pool for library.db
-static pool_slot_t library_pool[POOL_SIZE];
+static pool_slot_t library_pool[POOL_SIZE_MAX];
 static pthread_mutex_t pool_mutex = PTHREAD_MUTEX_INITIALIZER;
 static char library_db_path[512] = {0};
+static int configured_pool_size = POOL_SIZE_DEFAULT;
+
+// Get configured pool size (call after init)
+static int get_pool_size(void) {
+    return configured_pool_size;
+}
 
 // Connection idle timeout (seconds) - release slots idle longer than this
 // Must be long enough for slow queries and Plex processing between step() calls
@@ -100,8 +106,21 @@ static void pg_set_socket_timeout(PGconn *pg_conn) {
 static void do_client_init(void) {
     memset(connections, 0, sizeof(connections));
     memset(library_pool, 0, sizeof(library_pool));
+
+    // Read pool size from environment (default: 50, max: 100)
+    const char *pool_env = getenv("PLEX_PG_POOL_SIZE");
+    if (pool_env) {
+        int size = atoi(pool_env);
+        if (size > 0 && size <= POOL_SIZE_MAX) {
+            configured_pool_size = size;
+        } else if (size > POOL_SIZE_MAX) {
+            configured_pool_size = POOL_SIZE_MAX;
+            LOG_INFO("PLEX_PG_POOL_SIZE=%d exceeds max, using %d", size, POOL_SIZE_MAX);
+        }
+    }
+
     client_initialized = 1;
-    LOG_DEBUG("pg_client initialized with pool size %d", POOL_SIZE);
+    LOG_INFO("pg_client initialized with pool size %d (max %d)", configured_pool_size, POOL_SIZE_MAX);
 }
 
 void pg_client_init(void) {
@@ -124,7 +143,7 @@ void pg_client_cleanup(void) {
 
     // Clean up pool - use atomic state transitions
     pthread_mutex_lock(&pool_mutex);
-    for (int i = 0; i < POOL_SIZE; i++) {
+    for (int i = 0; i < configured_pool_size; i++) {
         // Force transition to FREE regardless of current state
         pool_slot_state_t old_state = atomic_exchange(&library_pool[i].state, SLOT_FREE);
 
@@ -206,7 +225,7 @@ pg_connection_t* pg_find_connection(sqlite3 *db) {
                     }
                     if (!found && db_to_pool_count < MAX_CONNECTIONS) {
                         // Find which pool slot we're using
-                        for (int j = 0; j < POOL_SIZE; j++) {
+                        for (int j = 0; j < configured_pool_size; j++) {
                             if (library_pool[j].conn == pool_conn) {
                                 db_to_pool[db_to_pool_count].db = db;
                                 db_to_pool[db_to_pool_count].pool_slot = j;
@@ -282,7 +301,7 @@ static void pool_reap_idle_connections(void) {
     int reaped = 0;
 
     // Only reap FREE slots with old connections - use atomic CAS to claim
-    for (int i = 0; i < POOL_SIZE; i++) {
+    for (int i = 0; i < configured_pool_size; i++) {
         if (library_pool[i].conn &&
             (now - library_pool[i].last_used) > POOL_IDLE_TIMEOUT) {
 
@@ -448,7 +467,7 @@ static pg_connection_t* pool_get_connection(const char *db_path) {
     // Phase 2 will reset these connections when claimed
     // CRITICAL: Timeout must be long enough for slow queries and Plex processing
     // =========================================================================
-    for (int i = 0; i < POOL_SIZE; i++) {
+    for (int i = 0; i < configured_pool_size; i++) {
         pool_slot_state_t state = atomic_load(&library_pool[i].state);
         if (state == SLOT_READY && (now - library_pool[i].last_used) > POOL_IDLE_TIMEOUT) {
             // Mark as FREE so Phase 2 can claim and reset it
@@ -463,7 +482,7 @@ static pg_connection_t* pool_get_connection(const char *db_path) {
     // =========================================================================
     // PHASE 1: Find thread's existing READY connection (lock-free)
     // =========================================================================
-    for (int i = 0; i < POOL_SIZE; i++) {
+    for (int i = 0; i < configured_pool_size; i++) {
         pool_slot_state_t state = atomic_load(&library_pool[i].state);
 
         if (state == SLOT_READY &&
@@ -497,7 +516,7 @@ static pg_connection_t* pool_get_connection(const char *db_path) {
     // =========================================================================
     // PHASE 2: Claim FREE slot with existing connection (reuse released slots)
     // =========================================================================
-    for (int i = 0; i < POOL_SIZE; i++) {
+    for (int i = 0; i < configured_pool_size; i++) {
         // Only try slots that have an existing connection we can reuse
         if (library_pool[i].conn == NULL) continue;
 
@@ -543,7 +562,7 @@ static pg_connection_t* pool_get_connection(const char *db_path) {
     // =========================================================================
     // PHASE 3: Find empty FREE slot and create new connection
     // =========================================================================
-    for (int i = 0; i < POOL_SIZE; i++) {
+    for (int i = 0; i < configured_pool_size; i++) {
         // Only try slots without existing connection
         if (library_pool[i].conn != NULL) continue;
 
@@ -585,7 +604,7 @@ static pg_connection_t* pool_get_connection(const char *db_path) {
     // =========================================================================
     // PHASE 4: Try to claim ERROR slots (failed connections that need retry)
     // =========================================================================
-    for (int i = 0; i < POOL_SIZE; i++) {
+    for (int i = 0; i < configured_pool_size; i++) {
         pool_slot_state_t expected = SLOT_ERROR;
         if (atomic_compare_exchange_strong(&library_pool[i].state,
                                            &expected, SLOT_RESERVED)) {
@@ -629,12 +648,12 @@ static pg_connection_t* pool_get_connection(const char *db_path) {
     // PHASE 5: Pool is full - log and return NULL
     // =========================================================================
     // Dump slot states for debugging
-    for (int i = 0; i < POOL_SIZE; i++) {
+    for (int i = 0; i < configured_pool_size; i++) {
         pool_slot_state_t state = atomic_load(&library_pool[i].state);
         LOG_ERROR("Pool slot %d: state=%d conn=%p owner=%p",
                  i, (int)state, (void*)library_pool[i].conn, (void*)library_pool[i].owner_thread);
     }
-    LOG_ERROR("Pool: no available slots for thread %p (all %d slots busy)", (void*)current_thread, POOL_SIZE);
+    LOG_ERROR("Pool: no available slots for thread %p (all %d slots busy)", (void*)current_thread, configured_pool_size);
     return NULL;
 }
 
@@ -652,7 +671,7 @@ void pg_pool_touch_connection(pg_connection_t *conn) {
     time_t now = time(NULL);
 
     // Find the slot for this connection (lock-free)
-    for (int i = 0; i < POOL_SIZE; i++) {
+    for (int i = 0; i < configured_pool_size; i++) {
         if (library_pool[i].conn == conn &&
             pthread_equal(library_pool[i].owner_thread, current_thread)) {
             library_pool[i].last_used = now;
@@ -679,7 +698,7 @@ int pg_pool_check_connection_health(pg_connection_t *conn) {
     pthread_t current_thread = pthread_self();
 
     // Find our slot and transition to RECONNECTING
-    for (int i = 0; i < POOL_SIZE; i++) {
+    for (int i = 0; i < configured_pool_size; i++) {
         if (library_pool[i].conn == conn &&
             pthread_equal(library_pool[i].owner_thread, current_thread)) {
 
@@ -745,7 +764,7 @@ void pg_close_pool_for_db(sqlite3 *db) {
 
     // If we found a pool slot owned by current thread, transition to FREE
     // The connection stays open for potential reuse by another thread
-    if (pool_slot >= 0 && pool_slot < POOL_SIZE) {
+    if (pool_slot >= 0 && pool_slot < configured_pool_size) {
         pthread_t current = pthread_self();
         if (library_pool[pool_slot].conn &&
             pthread_equal(library_pool[pool_slot].owner_thread, current)) {
