@@ -37,8 +37,9 @@ SQL_TR_OBJS = src/sql_translator.o src/sql_tr_helpers.o src/sql_tr_placeholders.
 # PG modules
 PG_MODULES = src/pg_config.o src/pg_logging.o src/pg_client.o src/pg_statement.o
 
-# All objects
+# All objects (macOS includes fishhook, Linux doesn't)
 OBJECTS = $(SQL_TR_OBJS) $(PG_MODULES) src/fishhook.o
+LINUX_OBJECTS = $(SQL_TR_OBJS) $(PG_MODULES)
 
 .PHONY: all clean install test macos linux run stop
 
@@ -55,8 +56,8 @@ macos: src/db_interpose_pg.c $(OBJECTS)
 		-L/opt/homebrew/opt/postgresql@15/lib -lpq
 
 # Explicit Linux build (uses refactored version with shared modules)
-linux: src/db_interpose_pg_linux.c $(OBJECTS)
-	gcc -shared -fPIC -o db_interpose_pg.so src/db_interpose_pg_linux.c $(OBJECTS) \
+linux: src/db_interpose_pg_linux.c $(LINUX_OBJECTS)
+	gcc -shared -fPIC -o db_interpose_pg.so src/db_interpose_pg_linux.c $(LINUX_OBJECTS) \
 		-I/usr/include/postgresql -Iinclude -Isrc \
 		-lpq -lsqlite3 -ldl -lpthread
 

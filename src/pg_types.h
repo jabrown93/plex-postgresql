@@ -6,6 +6,7 @@
 #ifndef PG_TYPES_H
 #define PG_TYPES_H
 
+#include <stdint.h>
 #include <sqlite3.h>
 #include <libpq-fe.h>
 #include <pthread.h>

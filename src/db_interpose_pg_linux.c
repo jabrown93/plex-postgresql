@@ -155,6 +155,7 @@ static void load_original_functions(void) {
 // ============================================================================
 
 static int shim_initialized = 0;
+static __thread int in_interpose_call = 0;
 
 // ============================================================================
 // Fake sqlite3_value for PostgreSQL results

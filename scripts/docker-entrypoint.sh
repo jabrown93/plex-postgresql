@@ -60,6 +60,8 @@ else
     echo "PLEX_PG_HOST not set, skipping PostgreSQL initialization"
 fi
 
-echo "Starting Plex Media Server..."
+echo "Starting Plex Media Server with PostgreSQL shim..."
+# Set LD_PRELOAD to inject our shim
+export LD_PRELOAD="/usr/local/lib/plex-postgresql/db_interpose_pg.so"
 # Execute the original entrypoint
 exec /init "$@"
