@@ -61,3 +61,19 @@ db_interpose_pg.c, not in modules. Need to copy this logic to Linux version.
 **Files created**:
 - `src/db_interpose_pg_linux_new.c` - New Linux version (WIP, ~600 lines)
   Uses shared modules, needs column/step logic
+
+### 2026-01-04 03:00
+Analyzed macOS step() function - 200+ lines of complex logic:
+- Cached statement handling
+- Write operation execution with SQL translation
+- Read operation with result caching
+- Connection pool integration
+- Mutex locking for thread safety
+
+**Realistic estimate**: Full Linux parity requires ~1500 lines of additional code.
+This is a multi-hour task, not a quick fix.
+
+**Current state**:
+- `db_interpose_pg_linux_new.c` has basic structure
+- Needs: prepare_v2, step, column access implementations
+- Can compile but won't work yet
