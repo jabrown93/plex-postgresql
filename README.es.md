@@ -13,6 +13,15 @@ Una biblioteca shim que intercepta las llamadas SQLite de Plex y las redirige a 
 | Linux (Docker) | ✅ Funciona (init y ejecución probados, no probado en producción) |
 | Linux (Nativo) | ⚠️ No probado |
 
+## ¿Por qué PostgreSQL?
+
+SQLite es excelente para la mayoría de instalaciones de Plex, pero tiene limitaciones a gran escala:
+
+- **Escaneos de biblioteca concurrentes** - SQLite bloquea toda la base de datos durante escrituras. Con PostgreSQL, múltiples escaneos pueden ejecutarse simultáneamente sin bloquearse.
+- **Rendimiento con almacenamiento remoto** - Si usas rclone, Real-Debrid u otro almacenamiento en la nube, PostgreSQL maneja los patrones de I/O mucho mejor que SQLite.
+- **Bibliotecas grandes** - Con más de 10K películas o 50K episodios, el optimizador de consultas e indexación de PostgreSQL supera a SQLite.
+- **Herramientas estándar** - Usa pg_dump para backups, configura replicación, o conecta con cualquier cliente PostgreSQL para depuración.
+
 ## Inicio Rápido (Docker)
 
 La forma más fácil de ejecutar Plex con PostgreSQL:
