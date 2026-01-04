@@ -97,11 +97,10 @@ sudo systemctl stop plexmediaserver
 sudo ./scripts/uninstall_wrappers_linux.sh
 ```
 
-### Docker
+### Docker (WIP)
 
-```bash
-docker-compose up -d
-```
+Docker has glibc/musl compatibility issues with linuxserver/plex.
+Use native install for now.
 
 ## Configuration
 
