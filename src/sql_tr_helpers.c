@@ -6,6 +6,25 @@
 #include "sql_translator_internal.h"
 
 // ============================================================================
+// Safe strcasestr implementation
+// musl's strcasestr has issues with certain inputs, so we implement our own
+// ============================================================================
+
+char* safe_strcasestr(const char *haystack, const char *needle) {
+    if (!haystack || !needle) return NULL;
+    if (!*needle) return (char*)haystack;
+
+    size_t needle_len = strlen(needle);
+
+    for (const char *p = haystack; *p; p++) {
+        if (strncasecmp(p, needle, needle_len) == 0) {
+            return (char*)p;
+        }
+    }
+    return NULL;
+}
+
+// ============================================================================
 // String Replace (case-sensitive)
 // ============================================================================
 

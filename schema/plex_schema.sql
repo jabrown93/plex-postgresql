@@ -2,6 +2,7 @@
 -- PostgreSQL database dump
 --
 
+\restrict prQ1zinOfl7cVlT1T5opKqaR8ST4uowaqTTlABa8Q4HC2Bxa22yxTWQdRFvSMTD
 
 -- Dumped from database version 15.15 (Homebrew)
 -- Dumped by pg_dump version 15.15 (Homebrew)
@@ -3713,5 +3714,486 @@ CREATE TRIGGER tags_search_update BEFORE INSERT OR UPDATE ON plex.tags FOR EACH 
 -- PostgreSQL database dump complete
 --
 
-\unrestrict RzCJVfSWhnEiv66Z2dg9kpk1JpyxuwfJaaqSfFjlFP5BLtsSeZ4ErwzpZsSzC9L
+\unrestrict prQ1zinOfl7cVlT1T5opKqaR8ST4uowaqTTlABa8Q4HC2Bxa22yxTWQdRFvSMTD
+
+
+-- schema_migrations data
+--
+-- PostgreSQL database dump
+--
+
+\restrict RgMZNQiGswc5GaeFy9akDnvWbouqV1tBBvr5dZBigwjZf307CZedb9Jz1Jq2OEo
+
+-- Dumped from database version 15.15 (Homebrew)
+-- Dumped by pg_dump version 15.15 (Homebrew)
+
+SET statement_timeout = 0;
+SET lock_timeout = 0;
+SET idle_in_transaction_session_timeout = 0;
+SET client_encoding = 'UTF8';
+SET standard_conforming_strings = on;
+SELECT pg_catalog.set_config('search_path', '', false);
+SET check_function_bodies = false;
+SET xmloption = content;
+SET client_min_messages = warning;
+SET row_security = off;
+
+--
+-- Data for Name: schema_migrations; Type: TABLE DATA; Schema: plex; Owner: -
+--
+
+COPY plex.schema_migrations (version, rollback_sql, optimize_on_rollback, min_version) FROM stdin;
+pg_adapter_1.0.0	\N	\N	\N
+20090909023322	\N	\N	\N
+20090909023336	\N	\N	\N
+20090909023346	\N	\N	\N
+20090909023403	\N	\N	\N
+20090911050510	\N	\N	\N
+20090911050516	\N	\N	\N
+20090919073339	\N	\N	\N
+20090919204504	\N	\N	\N
+20091001173531	\N	\N	\N
+20091001174113	\N	\N	\N
+20091023094310	\N	\N	\N
+20091023095546	\N	\N	\N
+20100103201027	\N	\N	\N
+20100103201139	\N	\N	\N
+20100316084646	\N	\N	\N
+20100316084659	\N	\N	\N
+20100326085538	\N	\N	\N
+20100528200318	\N	\N	\N
+20100624074248	\N	\N	\N
+20101001034731	\N	\N	\N
+20101106014611	\N	\N	\N
+20101108123901	\N	\N	\N
+20101213214640	\N	\N	\N
+20110123005345	\N	\N	\N
+20110208224235	\N	\N	\N
+20110210210219	\N	\N	\N
+20110213224325	\N	\N	\N
+20110228205754	\N	\N	\N
+20110303103325	\N	\N	\N
+20110318010108	\N	\N	\N
+20110318042447	\N	\N	\N
+20110321192336	\N	\N	\N
+20110403060904	\N	\N	\N
+20110409010721	\N	\N	\N
+20110419033239	\N	\N	\N
+20110609004841	\N	\N	\N
+20110609004928	\N	\N	\N
+20110609004946	\N	\N	\N
+20110627212748	\N	\N	\N
+20110824001751	\N	\N	\N
+20111210074434	\N	\N	\N
+20120128005603	\N	\N	\N
+20120328011928	\N	\N	\N
+20120430195613	\N	\N	\N
+20120601092900	\N	\N	\N
+20120621065053	\N	\N	\N
+20120621223321	\N	\N	\N
+20120807024646	\N	\N	\N
+20120924061056	\N	\N	\N
+20120926052159	\N	\N	\N
+20121011035113	\N	\N	\N
+20130419192604	\N	\N	\N
+20130725054748	\N	\N	\N
+20130809052006	\N	\N	\N
+20130828040137	\N	\N	\N
+20131026213608	\N	\N	\N
+20131110155400	\N	\N	\N
+20131120000000	\N	\N	\N
+20140115061336	\N	\N	\N
+20140203073610	\N	\N	\N
+20140227213926	\N	\N	\N
+20140406023548	\N	\N	\N
+20140708200053	\N	\N	\N
+20140720200657	\N	\N	\N
+20140810002525	\N	\N	\N
+20140811001121	\N	\N	\N
+20140811002027	\N	\N	\N
+20140829040944	\N	\N	\N
+20140617214540	\N	\N	\N
+20150116180125	\N	\N	\N
+20150414163622	\N	\N	\N
+20150505122642	\N	\N	\N
+20150523204431	\N	\N	\N
+20150608182542	\N	\N	\N
+20150610165102	\N	\N	\N
+20150818011012	\N	\N	\N
+20150218161152	\N	\N	\N
+20151208182042	\N	\N	\N
+20151221000000	\N	\N	\N
+20160115145047	\N	\N	\N
+20160312202000	\N	\N	\N
+20151111185126	\N	\N	\N
+20150819235734	\N	\N	\N
+20160101152400	\N	\N	\N
+20160212000000	\N	\N	\N
+20160616000000	select 1	0	\N
+20160610202642	select 1	0	\N
+20161104000000	\N	\N	\N
+20161109175500	\N	\N	\N
+20161103000000	\N	\N	\N
+20151205173000	\N	\N	\N
+20160412152400	\N	\N	\N
+20160728152400	\N	\N	\N
+20160826152400	\N	\N	\N
+20160806152400	\N	\N	\N
+20170105152400	\N	\N	\N
+20170110000000	\N	\N	\N
+20170216152400	\N	\N	\N
+20161214000000	\N	\N	\N
+20170404000000	select 1	1	\N
+20170618000000	\N	\N	\N
+20170705000000	\N	\N	\N
+20170617032400	\N	\N	\N
+20170629000000	\N	\N	\N
+20170630000000	\N	\N	\N
+20170707000000	\N	\N	\N
+20171018032400	\N	\N	\N
+20180220032400	\N	\N	\N
+20180324032400	update metadata_items set absolute_index=`index`,`index`=1 where metadata_type=18;update metadata_items set absolute_index=null where absolute_index is not null and metadata_type in (1,2)	0	\N
+20180501000000	DROP index 'index_title_sort_naturalsort'	1	\N
+20180531000000	select 1	1	\N
+20180626000000	select 1	0	\N
+20180703000000	\N	\N	\N
+20180924000000	\N	\N	\N
+20180928000000	\N	\N	\N
+20181029131300	select 1	0	\N
+20181119190600	\N	\N	\N
+20181210190600	\N	\N	\N
+20161017000000	\N	\N	\N
+20170213173900	\N	\N	\N
+20170403201322	\N	\N	\N
+20170615000000	select 1	1	\N
+20190130000000	select 1	0	\N
+20190201190600	\N	\N	\N
+20190205190600	\N	\N	\N
+20190215190600	\N	\N	\N
+20190218032400	\N	\N	\N
+20190316132700	\N	\N	\N
+20190403100000	update media_provider_resources set uri='https://podcasts.provider.plex.tv' where uri='provider://tv.plex.provider.podcasts';update media_provider_resources set uri='https://podcasts-staging.provider.plex.tv' where uri='provider://tv.plex.provider.podcasts-staging';	0	\N
+20190501100000	select 1	0	\N
+20190528190600	select 1	0	\N
+20190520131301	delete from media_provider_resources where identifier = 'tv.plex.providers.epg.cloud';	0	\N
+20190520131302	update media_provider_resources set parent_id = null where parent_id in (select parent_id from media_provider_resources where identifier = 'tv.plex.providers.epg.cloud');	0	\N
+20190520131303	delete from media_provider_resources where id in (select parent_id from media_provider_resources where identifier = 'tv.plex.providers.epg.cloud');	0	\N
+20190603140000	select 1	0	\N
+20190612032400	\N	\N	\N
+20190614032400	\N	\N	\N
+20190708132500	\N	\N	\N
+20190430032400	\N	\N	\N
+20190111032400	select 1	0	\N
+20190815130000	\N	\N	\N
+20190912140000	select 1	0	\N
+20180330131300	\N	\N	\N
+20190801130200	select 1	0	\N
+20190604032400	select 1	1	\N
+20190919032400	UPDATE library_sections set agent='com.plexapp.agents.plexmusic', scanner='Plex Premium Music Scanner' where agent='tv.plex.agents.music'	0	\N
+20190920032400	\N	\N	\N
+20190616032400	select 1	1	\N
+20191003131300	select 1	0	\N
+20191213143300	select 1	1	\N
+20200110143300	\N	\N	\N
+20200114193300	\N	\N	\N
+20200124193500	\N	\N	\N
+20200131193503	UPDATE metadata_items SET extra_data = replace(extra_data, 'pv%3AreadOnly=', 'at%3AreadOnly=') WHERE extra_data LIKE '%pv^%3AreadOnly=%' escape '^'	0	\N
+20191125131300	select 1	0	\N
+20200224131300	select 1	0	\N
+20200327131300	select 1	0	\N
+20200401131300	UPDATE library_sections SET user_fields = replace(replace(user_fields, 'pr%3Ahidden=0', 'pr%includeInGlobal=1'), 'pr%3Ahidden=1', 'pr%3AincludeInGlobal=0') WHERE user_fields LIKE '%pr^%3Ahidden=%' escape '^'	0	\N
+20200506172900	select 1	0	\N
+20200515172900	select 1	0	\N
+20200610150000	select 1	0	\N
+20200615032400	\N	\N	\N
+20200701090000	select 1	0	\N
+20200728130000	select 1	0	\N
+20200731130000	select 1	0	\N
+20200812130000	select 1	0	\N
+20200921130000	\N	\N	\N
+20201103130000	select 1	0	\N
+20201119130000	select 1	0	\N
+20210304150000	\N	\N	\N
+500000000000	CREATE INDEX 'index_title_sort_naturalsort' ON 'metadata_items' ('title_sort' COLLATE naturalsort)	1	\N
+500000000000.011	DROP index if exists 'index_title_sort_naturalsort'	0	\N
+500000000000.021	DROP index if exists 'index_title_sort_icu'	0	\N
+500000000001	CREATE TRIGGER fts4_tag_titles_after_insert AFTER INSERT ON tags BEGIN INSERT INTO fts4_tag_titles(docid, tag) VALUES(new.rowid, new.tag); END	0	\N
+500000000001.011	CREATE TRIGGER fts4_tag_titles_after_update AFTER UPDATE ON tags BEGIN INSERT INTO fts4_tag_titles(docid, tag) VALUES(new.rowid, new.tag); END	0	\N
+500000000001.021	CREATE TRIGGER fts4_tag_titles_before_delete BEFORE DELETE ON tags BEGIN DELETE FROM fts4_tag_titles WHERE docid=old.rowid; END	0	\N
+500000000001.031	CREATE TRIGGER fts4_tag_titles_before_update BEFORE UPDATE ON tags BEGIN DELETE FROM fts4_tag_titles WHERE docid=old.rowid; END	0	\N
+500000000001.041	CREATE TRIGGER fts4_metadata_titles_after_insert AFTER INSERT ON metadata_items BEGIN INSERT INTO fts4_metadata_titles(docid, title, title_sort, original_title) VALUES(new.rowid, new.title, new.title_sort, new.original_title); END	0	\N
+500000000001.051	CREATE TRIGGER fts4_metadata_titles_after_update AFTER UPDATE ON metadata_items BEGIN INSERT INTO fts4_metadata_titles(docid, title, title_sort, original_title) VALUES(new.rowid, new.title, new.title_sort, new.original_title); END	0	\N
+500000000001.061	CREATE TRIGGER fts4_metadata_titles_before_delete BEFORE DELETE ON metadata_items BEGIN DELETE FROM fts4_metadata_titles WHERE docid=old.rowid; END	0	\N
+500000000001.071	CREATE TRIGGER fts4_metadata_titles_before_update BEFORE UPDATE ON metadata_items BEGIN DELETE FROM fts4_metadata_titles WHERE docid=old.rowid; END	0	\N
+500000000001.081	drop trigger if exists fts4_tag_titles_after_insert	0	\N
+500000000001.091	drop trigger if exists fts4_tag_titles_after_update	0	\N
+500000000001.101	drop trigger if exists fts4_tag_titles_before_delete	0	\N
+500000000001.111	drop trigger if exists fts4_tag_titles_before_update	0	\N
+500000000001.121	drop trigger if exists fts4_metadata_titles_after_insert	0	\N
+500000000001.131	drop trigger if exists fts4_metadata_titles_after_update	0	\N
+500000000001.141	drop trigger if exists fts4_metadata_titles_before_delete	0	\N
+500000000001.151	drop trigger if exists fts4_metadata_titles_before_update	0	\N
+500000000001.161	drop trigger if exists fts4_tag_titles_after_insert_icu	0	\N
+500000000001.171	drop trigger if exists fts4_tag_titles_after_update_icu	0	\N
+500000000001.181	drop trigger if exists fts4_tag_titles_before_delete_icu	0	\N
+500000000001.191	drop trigger if exists fts4_tag_titles_before_update_icu	0	\N
+500000000001.201	drop trigger if exists fts4_metadata_titles_after_insert_icu	0	\N
+500000000001.211	drop trigger if exists fts4_metadata_titles_after_update_icu	0	\N
+500000000001.221	drop trigger if exists fts4_metadata_titles_before_delete_icu	0	\N
+500000000001.231	drop trigger if exists fts4_metadata_titles_before_update_icu	0	\N
+20210628131300	select 1	0	\N
+202107070000	select 1	1	\N
+202107221100	update metadata_items set refreshed_at=NULL where id in (select DISTINCT metadata_items.id from metadata_items join media_items on media_items.metadata_item_id = metadata_items.id where media_items.id in ( select DISTINCT media_item_id from media_streams where language<>'' and length(language)<>3 and url<>'' and url<>'blob://'))	0	\N
+202107221100.011	update media_items set media_analysis_version=0 where media_analysis_version>0 and id in (select distinct media_item_id from media_streams where language<>'' and length(language)<>3)	0	\N
+20210726150000	\N	\N	\N
+20210830032400	select 1	0	\N
+202109061500	select 1	1	\N
+20210922132300	\N	\N	\N
+20211027132200	\N	\N	\N
+20211116115800	select 1	1	\N
+20211208163900	select 1	0	\N
+202203040100	update metadata_items set originally_available_at = iif(typeof(originally_available_at) in ('integer', 'real'), datetime(originally_available_at, 'unixepoch'), originally_available_at), available_at = iif(typeof(available_at) in ('integer', 'real'), datetime(available_at, 'unixepoch', 'localtime'), available_at), expires_at = iif(typeof(expires_at) in ('integer', 'real'), datetime(expires_at, 'unixepoch', 'localtime'), expires_at), refreshed_at = iif(typeof(refreshed_at) in ('integer', 'real'), datetime(refreshed_at, 'unixepoch', 'localtime'), refreshed_at), added_at = iif(typeof(added_at) in ('integer', 'real'), datetime(added_at, 'unixepoch', 'localtime'), added_at), created_at = iif(typeof(created_at) in ('integer', 'real'), datetime(created_at, 'unixepoch', 'localtime'), created_at), updated_at = iif(typeof(updated_at) in ('integer', 'real'), datetime(updated_at, 'unixepoch', 'localtime'), updated_at), deleted_at = iif(typeof(deleted_at) in ('integer', 'real'), datetime(deleted_at, 'unixepoch', 'localtime'), deleted_at)	1	\N
+202203040100.011	PRAGMA writable_schema = RESET	0	\N
+202203040100.021	UPDATE sqlite_schema SET sql = replace(sql, 'dt_integer(8)', 'datetime') WHERE name = 'metadata_items' AND type = 'table'	0	\N
+202203040100.031	PRAGMA writable_schema = TRUE	0	\N
+202209271322.011	CREATE INDEX 'index_synchronization_files_on_sync_item_id' ON 'synchronization_files' ('sync_item_id' )	0	\N
+202209271322.021	CREATE INDEX 'index_synchronization_files_on_sync_list_id' ON 'synchronization_files' ('sync_list_id' )	0	\N
+202203220200	update media_items set begins_at = iif(typeof(begins_at) in ('integer', 'real'), datetime(begins_at, 'unixepoch'), begins_at), ends_at = iif(typeof(ends_at) in ('integer', 'real'), datetime(ends_at, 'unixepoch'), ends_at), created_at = iif(typeof(created_at) in ('integer', 'real'), datetime(created_at, 'unixepoch', 'localtime'), created_at), updated_at = iif(typeof(updated_at) in ('integer', 'real'), datetime(updated_at, 'unixepoch', 'localtime'), updated_at), deleted_at = iif(typeof(deleted_at) in ('integer', 'real'), datetime(deleted_at, 'unixepoch', 'localtime'), deleted_at)	1	\N
+202203220200.011	PRAGMA writable_schema = RESET	0	\N
+202203220200.021	UPDATE sqlite_schema SET sql = replace(sql, 'dt_integer(8)', 'datetime') WHERE name = 'media_items' AND type = 'table'	0	\N
+202203220200.031	PRAGMA writable_schema = TRUE	0	\N
+202204252200	update media_parts set created_at = iif(typeof(created_at) in ('integer', 'real'), datetime(created_at, 'unixepoch', 'localtime'), created_at), updated_at = iif(typeof(updated_at) in ('integer', 'real'), datetime(updated_at, 'unixepoch', 'localtime'), updated_at), deleted_at = iif(typeof(deleted_at) in ('integer', 'real'), datetime(deleted_at, 'unixepoch', 'localtime'), deleted_at)	1	\N
+202204252200.011	PRAGMA writable_schema = RESET	0	\N
+202204252200.021	UPDATE sqlite_schema SET sql = replace(sql, 'dt_integer(8)', 'datetime') WHERE name = 'media_parts' AND type = 'table'	0	\N
+202204252200.031	PRAGMA writable_schema = TRUE	0	\N
+202204252300	update media_streams set created_at = iif(typeof(created_at) in ('integer', 'real'), datetime(created_at, 'unixepoch', 'localtime'), created_at), updated_at = iif(typeof(updated_at) in ('integer', 'real'), datetime(updated_at, 'unixepoch', 'localtime'), updated_at)	1	\N
+202204252300.011	PRAGMA writable_schema = RESET	0	\N
+202204252300.021	UPDATE sqlite_schema SET sql = replace(sql, 'dt_integer(8)', 'datetime') WHERE name = 'media_streams' AND type = 'table'	0	\N
+202204252300.031	PRAGMA writable_schema = TRUE	0	\N
+202204252330	update metadata_item_settings set last_viewed_at = iif(typeof(last_viewed_at) in ('integer', 'real'), datetime(last_viewed_at, 'unixepoch', 'localtime'), last_viewed_at), last_skipped_at = iif(typeof(last_skipped_at) in ('integer', 'real'), datetime(last_skipped_at, 'unixepoch', 'localtime'), last_skipped_at), last_rated_at = iif(typeof(last_rated_at) in ('integer', 'real'), datetime(last_rated_at, 'unixepoch', 'localtime'), last_rated_at), created_at = iif(typeof(created_at) in ('integer', 'real'), datetime(created_at, 'unixepoch', 'localtime'), created_at), updated_at = iif(typeof(updated_at) in ('integer', 'real'), datetime(updated_at, 'unixepoch', 'localtime'), updated_at)	1	\N
+202204252330.011	PRAGMA writable_schema = RESET	0	\N
+202204252330.021	UPDATE sqlite_schema SET sql = replace(sql, 'dt_integer(8)', 'datetime') WHERE name = 'metadata_item_settings' AND type = 'table'	0	\N
+202204252330.031	PRAGMA writable_schema = TRUE	0	\N
+202205090900	update media_item_settings set created_at = iif(typeof(created_at) in ('integer', 'real'), datetime(created_at, 'unixepoch', 'localtime'), created_at), updated_at = iif(typeof(updated_at) in ('integer', 'real'), datetime(updated_at, 'unixepoch', 'localtime'), updated_at)	1	\N
+202205090900.011	PRAGMA writable_schema = RESET	0	\N
+202205090900.021	UPDATE sqlite_schema SET sql = replace(sql, 'dt_integer(8)', 'datetime') WHERE name = 'media_item_settings' AND type = 'table'	0	\N
+202205090900.031	PRAGMA writable_schema = TRUE	0	\N
+202205090930	update media_part_settings set created_at = iif(typeof(created_at) in ('integer', 'real'), datetime(created_at, 'unixepoch', 'localtime'), created_at), updated_at = iif(typeof(updated_at) in ('integer', 'real'), datetime(updated_at, 'unixepoch', 'localtime'), updated_at)	1	\N
+202205090930.011	PRAGMA writable_schema = RESET	0	\N
+202205090930.021	UPDATE sqlite_schema SET sql = replace(sql, 'dt_integer(8)', 'datetime') WHERE name = 'media_part_settings' AND type = 'table'	0	\N
+202205090930.031	PRAGMA writable_schema = TRUE	0	\N
+202205090940	update media_stream_settings set created_at = iif(typeof(created_at) in ('integer', 'real'), datetime(created_at, 'unixepoch', 'localtime'), created_at), updated_at = iif(typeof(updated_at) in ('integer', 'real'), datetime(updated_at, 'unixepoch', 'localtime'), updated_at)	1	\N
+202205090940.011	PRAGMA writable_schema = RESET	0	\N
+202205090940.021	UPDATE sqlite_schema SET sql = replace(sql, 'dt_integer(8)', 'datetime') WHERE name = 'media_stream_settings' AND type = 'table'	0	\N
+202205090940.031	PRAGMA writable_schema = TRUE	0	\N
+202205091600	update metadata_item_views set originally_available_at = iif(typeof(originally_available_at) in ('integer', 'real'), datetime(originally_available_at, 'unixepoch', 'localtime'), originally_available_at), viewed_at = iif(typeof(viewed_at) in ('integer', 'real'), datetime(viewed_at, 'unixepoch', 'localtime'), viewed_at)	1	\N
+202205091600.011	PRAGMA writable_schema = RESET	0	\N
+202205091600.021	UPDATE sqlite_schema SET sql = replace(sql, 'dt_integer(8)', 'datetime') WHERE name = 'metadata_item_views' AND type = 'table'	0	\N
+202205091600.031	PRAGMA writable_schema = TRUE	0	\N
+202205091700	update view_settings set created_at = iif(typeof(created_at) in ('integer', 'real'), datetime(created_at, 'unixepoch', 'localtime'), created_at), updated_at = iif(typeof(updated_at) in ('integer', 'real'), datetime(updated_at, 'unixepoch', 'localtime'), updated_at)	1	\N
+202205091700.011	PRAGMA writable_schema = RESET	0	\N
+202205091700.021	UPDATE sqlite_schema SET sql = replace(sql, 'dt_integer(8)', 'datetime') WHERE name = 'view_settings' AND type = 'table'	0	\N
+202205091700.031	PRAGMA writable_schema = TRUE	0	\N
+202205181200	\N	\N	\N
+202206291100	\N	\N	\N
+20220818122500	delete from metadata_relations where relation_type = 100	0	\N
+202209091100	CREATE INDEX 'index_cloudsync_files_on_device_identifier_and_original_url' ON 'cloudsync_files' ('device_identifier', 'original_url')	0	\N
+202209091100.011	DROP INDEX IF EXISTS 'index_cloudsync_files_on_device_identifier_and_original_url'	0	\N
+202209091100.021	CREATE TABLE 'cloudsync_files' ('id' INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, 'device_identifier' varchar(255), 'original_url' varchar(255), 'provider' varchar(255), 'new_key' varchar(255), 'query_string' varchar(255), 'extra_data' varchar(255))	0	\N
+202209091100.031	DROP TABLE IF EXISTS cloudsync_files	0	\N
+20220911115800	select 1	1	\N
+202209271322	CREATE INDEX 'index_synchronization_files_on_item_uri' ON 'synchronization_files' ('item_uri' )	0	\N
+202209271322.031	CREATE INDEX 'index_synchronization_files_on_client_identifier' ON 'synchronization_files' ('client_identifier' )	0	\N
+202209271322.041	CREATE TABLE IF NOT EXISTS 'synchronization_files' ('id' INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, 'client_identifier' varchar(255), 'sync_list_id' integer(8), 'sync_item_id' integer(8), 'item_uri' varchar(255), 'num_parts' integer, 'state' integer, 'state_context' integer, 'extra_data' varchar(255))	0	\N
+202209271322.051	DROP TABLE IF EXISTS 'synchronization_files'	0	\N
+202209271322.061	CREATE UNIQUE INDEX 'index_synced_play_queue_generators_on_sync_list_id_and_play_queue_generator_id' ON 'synced_play_queue_generators' ('sync_list_id', 'play_queue_generator_id' )	0	\N
+202209271322.071	CREATE INDEX 'index_synced_play_queue_generators_on_state' ON 'synced_play_queue_generators' ('state' )	0	\N
+202209271322.081	CREATE INDEX 'index_synced_play_queue_generators_on_changed_at' ON 'synced_play_queue_generators' ('changed_at' )	0	\N
+202209271322.091	CREATE INDEX 'index_synced_play_queue_generators_on_play_queue_generator_id' ON 'synced_play_queue_generators' ('play_queue_generator_id' )	0	\N
+202209271322.101	CREATE INDEX 'index_synced_play_queue_generators_on_playlist_id' ON 'synced_play_queue_generators' ('playlist_id' )	0	\N
+202209271322.111	CREATE INDEX 'index_synced_play_queue_generators_on_sync_item_id' ON 'synced_play_queue_generators' ('sync_item_id' )	0	\N
+202209271322.121	CREATE INDEX 'index_synced_play_queue_generators_on_sync_list_id' ON 'synced_play_queue_generators' ('sync_list_id' )	0	\N
+202209271322.131	CREATE TABLE IF NOT EXISTS 'synced_play_queue_generators' ('id' INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, 'sync_list_id' integer(8), 'sync_item_id' integer(8), 'playlist_id' integer, 'play_queue_generator_id' integer, 'changed_at' integer(8), 'state' integer, 'state_context' integer, 'first_packaged_at' integer(8))	0	\N
+202209271322.141	DROP TABLE IF EXISTS 'synced_play_queue_generators'	0	\N
+202209271322.151	CREATE UNIQUE INDEX 'index_synced_metadata_items_on_sync_list_id_and_metadata_item_id' ON 'synced_metadata_items' ('sync_list_id', 'metadata_item_id' )	0	\N
+202209271322.161	CREATE INDEX 'index_synced_metadata_items_library_section_id' ON 'synced_metadata_items' ('library_section_id')	0	\N
+202209271322.171	CREATE INDEX 'index_synced_metadata_items_parent_id' ON 'synced_metadata_items' ('parent_id')	0	\N
+202209271322.181	CREATE INDEX 'index_synced_metadata_items_on_state' ON 'synced_metadata_items' ('state' )	0	\N
+202209271322.191	CREATE INDEX 'index_synced_metadata_items_on_first_packaged_at' ON 'synced_metadata_items' ('first_packaged_at' )	0	\N
+202209271322.201	CREATE INDEX 'index_synced_metadata_items_on_changed_at' ON 'synced_metadata_items' ('changed_at' )	0	\N
+202209271322.211	CREATE INDEX 'index_synced_metadata_items_on_metadata_item_id' ON 'synced_metadata_items' ('metadata_item_id' )	0	\N
+202209271322.221	CREATE INDEX 'index_synced_metadata_items_on_sync_item_id' ON 'synced_metadata_items' ('sync_item_id' )	0	\N
+202209271322.231	CREATE INDEX 'index_synced_metadata_items_on_sync_list_id' ON 'synced_metadata_items' ('sync_list_id' )	0	\N
+202209271322.241	CREATE TABLE IF NOT EXISTS 'synced_metadata_items' ('id' INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, 'sync_list_id' integer(8), 'sync_item_id' integer(8), 'metadata_item_id' integer, 'changed_at' integer(8), 'first_packaged_at' integer(8), 'state' integer, 'state_context' integer, 'selected_media_id' integer, 'selected_part_id' integer, 'media_decision' integer, 'file_size' integer(8), 'media_analysis_extra_data' varchar(255), 'parent_id' integer, 'library_section_id' integer)	0	\N
+202209271322.251	DROP TABLE IF EXISTS 'synced_metadata_items'	0	\N
+202209271322.261	CREATE UNIQUE INDEX 'index_synced_library_sections_on_sync_list_id_and_library_section_id' ON 'synced_library_sections' ('sync_list_id', 'library_section_id')	0	\N
+202209271322.271	CREATE INDEX 'index_synced_library_sections_state' ON 'synced_library_sections' ('state')	0	\N
+202209271322.281	CREATE INDEX 'index_synced_library_sections_on_reference_count' ON 'synced_library_sections' ('reference_count')	0	\N
+202209271322.291	CREATE INDEX 'index_synced_library_sections_on_changed_at' ON 'synced_library_sections' ('changed_at')	0	\N
+202209271322.301	CREATE INDEX 'index_synced_library_sections_on_library_section_id' ON 'synced_library_sections' ('library_section_id')	0	\N
+202209271322.311	CREATE INDEX 'index_synced_library_sections_on_sync_list_id' ON 'synced_library_sections' ('sync_list_id')	0	\N
+202209271322.321	CREATE TABLE IF NOT EXISTS 'synced_library_sections' ('id' INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, 'sync_list_id' integer(8), 'library_section_id' integer, 'changed_at' integer(8), 'reference_count' integer, 'first_packaged_at' integer(8), 'state' integer)	0	\N
+202209271322.331	DROP TABLE IF EXISTS 'synced_library_sections'	0	\N
+202209271322.341	CREATE UNIQUE INDEX 'index_synced_ancestor_items_on_sync_list_id_and_metadata_item_id' ON 'synced_ancestor_items' ('sync_list_id', 'metadata_item_id')	0	\N
+202209271322.351	CREATE INDEX 'index_synced_ancestor_items_state' ON 'synced_ancestor_items' ('state')	0	\N
+202209271322.361	CREATE INDEX 'index_synced_ancestor_items_parent_id' ON 'synced_ancestor_items' ('parent_id')	0	\N
+202209271322.371	CREATE INDEX 'index_synced_ancestor_items_on_reference_count' ON 'synced_ancestor_items' ('reference_count')	0	\N
+202209271322.381	CREATE INDEX 'index_synced_ancestor_items_on_changed_at' ON 'synced_ancestor_items' ('changed_at')	0	\N
+202209271322.391	CREATE INDEX 'index_synced_ancestor_items_on_metadata_item_id' ON 'synced_ancestor_items' ('metadata_item_id')	0	\N
+202209271322.401	CREATE INDEX 'index_synced_ancestor_items_on_sync_list_id' ON 'synced_ancestor_items' ('sync_list_id')	0	\N
+202209271322.411	CREATE TABLE IF NOT EXISTS 'synced_ancestor_items' ('id' INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, 'sync_list_id' integer(8), 'metadata_item_id' integer, 'changed_at' integer(8), 'reference_count' integer, 'first_packaged_at' integer(8), 'parent_id' integer, 'state' integer)	0	\N
+202209271322.421	DROP TABLE IF EXISTS synced_ancestor_items	0	\N
+202209271322.431	CREATE INDEX 'index_sync_schema_versions_on_changed_at' ON 'sync_schema_versions' ('changed_at')	0	\N
+202209271322.441	CREATE TABLE IF NOT EXISTS 'sync_schema_versions' ('id' INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, 'version' integer, 'changed_at' integer(8))	0	\N
+202209271322.451	DROP TABLE IF EXISTS 'sync_schema_versions'	0	\N
+202309200914	UPDATE metadata_item_settings SET extra_data = extra_data ->> 'url' WHERE extra_data IS NOT NULL and json_valid(extra_data)	0	\N
+202210260000	update directories set created_at = iif(typeof(created_at) in ('integer', 'real'), datetime(created_at, 'unixepoch', 'localtime'), created_at), updated_at = iif(typeof(updated_at) in ('integer', 'real'), datetime(updated_at, 'unixepoch', 'localtime'), updated_at), deleted_at = iif(typeof(deleted_at) in ('integer', 'real'), datetime(deleted_at, 'unixepoch', 'localtime'), deleted_at)	1	\N
+202210260000.011	PRAGMA writable_schema = RESET	0	\N
+202210260000.021	UPDATE sqlite_schema SET sql = replace(sql, 'dt_integer(8)', 'datetime') WHERE name = 'directories' AND type = 'table'	0	\N
+202210260000.031	PRAGMA writable_schema = TRUE	0	\N
+202210260100	update library_sections set created_at = iif(typeof(created_at) in ('integer', 'real'), datetime(created_at, 'unixepoch', 'localtime'), created_at), updated_at = iif(typeof(updated_at) in ('integer', 'real'), datetime(updated_at, 'unixepoch', 'localtime'), updated_at), scanned_at = iif(typeof(scanned_at) in ('integer', 'real'), datetime(scanned_at, 'unixepoch', 'localtime'), scanned_at)	1	\N
+202210260100.011	PRAGMA writable_schema = RESET	0	\N
+202210260100.021	UPDATE sqlite_schema SET sql = replace(sql, 'dt_integer(8)', 'datetime') WHERE name = 'library_sections' AND type = 'table'	0	\N
+202210260100.031	PRAGMA writable_schema = TRUE	0	\N
+202210260200	update section_locations set created_at = iif(typeof(created_at) in ('integer', 'real'), datetime(created_at, 'unixepoch', 'localtime'), created_at), updated_at = iif(typeof(updated_at) in ('integer', 'real'), datetime(updated_at, 'unixepoch', 'localtime'), updated_at), scanned_at = iif(typeof(scanned_at) in ('integer', 'real'), datetime(scanned_at, 'unixepoch', 'localtime'), scanned_at)	1	\N
+202210260200.011	PRAGMA writable_schema = RESET	0	\N
+202210260200.021	UPDATE sqlite_schema SET sql = replace(sql, 'dt_integer(8)', 'datetime') WHERE name = 'section_locations' AND type = 'table'	0	\N
+202210260200.031	PRAGMA writable_schema = TRUE	0	\N
+202212012200	update tags set created_at = iif(typeof(created_at) in ('integer', 'real'), datetime(created_at, 'unixepoch', 'localtime'), created_at), updated_at = iif(typeof(updated_at) in ('integer', 'real'), datetime(updated_at, 'unixepoch', 'localtime'), updated_at)	1	\N
+202212012200.011	PRAGMA writable_schema = RESET	0	\N
+202212012200.021	UPDATE sqlite_schema SET sql = replace(sql, 'dt_integer(8)', 'datetime') WHERE name = 'tags' AND type = 'table'	0	\N
+202212012200.031	PRAGMA writable_schema = TRUE	0	\N
+202212012300	update taggings set created_at = iif(typeof(created_at) in ('integer', 'real'), datetime(created_at, 'unixepoch', 'localtime'), created_at)	1	\N
+202212012300.011	PRAGMA writable_schema = RESET	0	\N
+202212012300.021	UPDATE sqlite_schema SET sql = replace(sql, 'dt_integer(8)', 'datetime') WHERE name = 'taggings' AND type = 'table'	0	\N
+202212012300.031	PRAGMA writable_schema = TRUE	0	\N
+202212022100	update media_grabs set created_at = iif(typeof(created_at) in ('integer', 'real'), datetime(created_at, 'unixepoch', 'localtime'), created_at), updated_at = iif(typeof(updated_at) in ('integer', 'real'), datetime(updated_at, 'unixepoch', 'localtime'), updated_at)	1	\N
+202212022100.011	PRAGMA writable_schema = RESET	0	\N
+202212022100.021	UPDATE sqlite_schema SET sql = replace(sql, 'dt_integer(8)', 'datetime') WHERE name = 'media_grabs' AND type = 'table'	0	\N
+202212022100.031	PRAGMA writable_schema = TRUE	0	\N
+202212022200	update media_provider_resources set last_seen_at = iif(typeof(last_seen_at) in ('integer', 'real'), datetime(last_seen_at, 'unixepoch', 'localtime'), last_seen_at), created_at = iif(typeof(created_at) in ('integer', 'real'), datetime(created_at, 'unixepoch', 'localtime'), created_at), updated_at = iif(typeof(updated_at) in ('integer', 'real'), datetime(updated_at, 'unixepoch', 'localtime'), updated_at)	1	\N
+202212022200.011	PRAGMA writable_schema = RESET	0	\N
+202212022200.021	UPDATE sqlite_schema SET sql = replace(sql, 'dt_integer(8)', 'datetime') WHERE name = 'media_provider_resources' AND type = 'table'	0	\N
+202212022200.031	PRAGMA writable_schema = TRUE	0	\N
+202212022300	update media_subscriptions set created_at = iif(typeof(created_at) in ('integer', 'real'), datetime(created_at, 'unixepoch', 'localtime'), created_at), updated_at = iif(typeof(updated_at) in ('integer', 'real'), datetime(updated_at, 'unixepoch', 'localtime'), updated_at)	1	\N
+202212022300.011	PRAGMA writable_schema = RESET	0	\N
+202212022300.021	UPDATE sqlite_schema SET sql = replace(sql, 'dt_integer(8)', 'datetime') WHERE name = 'media_subscriptions' AND type = 'table'	0	\N
+202212022300.031	PRAGMA writable_schema = TRUE	0	\N
+202301280000	\N	\N	\N
+20230118160000	\N	\N	\N
+20230830160000	select 1	0	\N
+202309200901	UPDATE external_metadata_items SET extra_data = extra_data ->> 'url' WHERE extra_data IS NOT NULL and json_valid(extra_data)	0	\N
+202309200902	UPDATE hub_templates SET extra_data = extra_data ->> 'url' WHERE extra_data IS NOT NULL and json_valid(extra_data)	0	\N
+202309200903	UPDATE locatables SET extra_data = extra_data ->> 'url' WHERE extra_data IS NOT NULL and json_valid(extra_data)	0	\N
+202309200904	UPDATE media_grabs SET extra_data = extra_data ->> 'url' WHERE extra_data IS NOT NULL and json_valid(extra_data)	0	\N
+202309200905	UPDATE media_provider_resources SET extra_data = extra_data ->> 'url' WHERE extra_data IS NOT NULL and json_valid(extra_data)	0	\N
+202309200906	UPDATE media_stream_settings SET extra_data = extra_data ->> 'url' WHERE extra_data IS NOT NULL and json_valid(extra_data)	0	\N
+202309200907	UPDATE media_subscriptions SET extra_data = extra_data ->> 'url' WHERE extra_data IS NOT NULL and json_valid(extra_data)	0	\N
+202309200908	UPDATE metadata_agent_providers SET extra_data = extra_data ->> 'url' WHERE extra_data IS NOT NULL and json_valid(extra_data)	0	\N
+202309200909	UPDATE metadata_item_clusters SET extra_data = extra_data ->> 'url' WHERE extra_data IS NOT NULL and json_valid(extra_data)	0	\N
+202309200910	UPDATE metadata_item_setting_markers SET extra_data = extra_data ->> 'url' WHERE extra_data IS NOT NULL and json_valid(extra_data)	0	\N
+202309200911	UPDATE media_items SET extra_data = extra_data ->> 'url' WHERE extra_data IS NOT NULL and json_valid(extra_data)	0	\N
+202309200912	UPDATE media_parts SET extra_data = extra_data ->> 'url' WHERE extra_data IS NOT NULL and json_valid(extra_data)	0	\N
+202309200913	UPDATE media_streams SET extra_data = extra_data ->> 'url' WHERE extra_data IS NOT NULL and json_valid(extra_data)	0	\N
+202402260801	\N	\N	\N
+202309200915	UPDATE metadata_items SET extra_data = extra_data ->> 'url' WHERE extra_data IS NOT NULL and json_valid(extra_data)	0	\N
+202309200916	UPDATE play_queue_generators SET extra_data = extra_data ->> 'url' WHERE extra_data IS NOT NULL and json_valid(extra_data)	0	\N
+202309200917	UPDATE play_queues SET extra_data = extra_data ->> 'url' WHERE extra_data IS NOT NULL and json_valid(extra_data)	0	\N
+202309200918	UPDATE taggings SET extra_data = extra_data ->> 'url' WHERE extra_data IS NOT NULL and json_valid(extra_data)	0	\N
+202309200919	UPDATE tags SET extra_data = extra_data ->> 'url' WHERE extra_data IS NOT NULL and json_valid(extra_data)	0	\N
+202311120800	select 1	0	\N
+202311171400	select 1	0	\N
+20231120161500	\N	\N	\N
+202312190800	update blobs set created_at = iif(typeof(created_at) in ('integer', 'real'), datetime(created_at, 'unixepoch', 'localtime'), created_at)	1	\N
+202312190800.011	PRAGMA writable_schema = RESET	0	\N
+202312190800.021	UPDATE sqlite_schema SET sql = replace(sql, 'dt_integer(8)', 'datetime') WHERE name = 'blobs' AND type = 'table'	0	\N
+202312190800.031	PRAGMA writable_schema = TRUE	0	\N
+202401290800	update locatables set created_at = iif(typeof(created_at) in ('integer', 'real'), datetime(created_at, 'unixepoch', 'localtime'), created_at),updated_at = iif(typeof(updated_at) in ('integer', 'real'), datetime(updated_at, 'unixepoch', 'localtime'), updated_at)	1	\N
+202401290800.011	PRAGMA writable_schema = RESET	0	\N
+202401290800.021	UPDATE sqlite_schema SET sql = replace(sql, 'dt_integer(8)', 'datetime') WHERE name = 'locatables' AND type = 'table'	0	\N
+202401290800.031	PRAGMA writable_schema = TRUE	0	\N
+202401290801	update accounts set created_at = iif(typeof(created_at) in ('integer', 'real'), datetime(created_at, 'unixepoch', 'localtime'), created_at),updated_at = iif(typeof(updated_at) in ('integer', 'real'), datetime(updated_at, 'unixepoch', 'localtime'), updated_at)	1	\N
+202401290801.011	PRAGMA writable_schema = RESET	0	\N
+202401290801.021	UPDATE sqlite_schema SET sql = replace(sql, 'dt_integer(8)', 'datetime') WHERE name = 'accounts' AND type = 'table'	0	\N
+202401290801.031	PRAGMA writable_schema = TRUE	0	\N
+202401290802	update metadata_item_clusters set starts_at = iif(typeof(starts_at) in ('integer', 'real'), datetime(starts_at, 'unixepoch', 'localtime'), starts_at),ends_at = iif(typeof(ends_at) in ('integer', 'real'), datetime(ends_at, 'unixepoch', 'localtime'), ends_at)	1	\N
+202401290802.011	PRAGMA writable_schema = RESET	0	\N
+202401290802.021	UPDATE sqlite_schema SET sql = replace(sql, 'dt_integer(8)', 'datetime') WHERE name = 'metadata_item_clusters' AND type = 'table'	0	\N
+202401290802.031	PRAGMA writable_schema = TRUE	0	\N
+202401290803	update metadata_relations set created_at = iif(typeof(created_at) in ('integer', 'real'), datetime(created_at, 'unixepoch', 'localtime'), created_at),updated_at = iif(typeof(updated_at) in ('integer', 'real'), datetime(updated_at, 'unixepoch', 'localtime'), updated_at)	1	\N
+202401290803.011	PRAGMA writable_schema = RESET	0	\N
+202401290803.021	UPDATE sqlite_schema SET sql = replace(sql, 'dt_integer(8)', 'datetime') WHERE name = 'metadata_relations' AND type = 'table'	0	\N
+202401290803.031	PRAGMA writable_schema = TRUE	0	\N
+202401290804	update play_queues set created_at = iif(typeof(created_at) in ('integer', 'real'), datetime(created_at, 'unixepoch', 'localtime'), created_at),updated_at = iif(typeof(updated_at) in ('integer', 'real'), datetime(updated_at, 'unixepoch', 'localtime'), updated_at)	1	\N
+202401290804.011	PRAGMA writable_schema = RESET	0	\N
+202401290804.021	UPDATE sqlite_schema SET sql = replace(sql, 'dt_integer(8)', 'datetime') WHERE name = 'play_queues' AND type = 'table'	0	\N
+202401290804.031	PRAGMA writable_schema = TRUE	0	\N
+202401290805	update play_queue_generators set created_at = iif(typeof(created_at) in ('integer', 'real'), datetime(created_at, 'unixepoch', 'localtime'), created_at),updated_at = iif(typeof(updated_at) in ('integer', 'real'), datetime(updated_at, 'unixepoch', 'localtime'), updated_at)	1	\N
+202401290805.011	PRAGMA writable_schema = RESET	0	\N
+202401290805.021	UPDATE sqlite_schema SET sql = replace(sql, 'dt_integer(8)', 'datetime') WHERE name = 'play_queue_generators' AND type = 'table'	0	\N
+202401290805.031	PRAGMA writable_schema = TRUE	0	\N
+202401290806	update plugins set installed_at = iif(typeof(installed_at) in ('integer', 'real'), datetime(installed_at, 'unixepoch', 'localtime'), installed_at),accessed_at = iif(typeof(accessed_at) in ('integer', 'real'), datetime(accessed_at, 'unixepoch', 'localtime'), accessed_at),modified_at = iif(typeof(modified_at) in ('integer', 'real'), datetime(modified_at, 'unixepoch', 'localtime'), modified_at)	1	\N
+202401290806.011	PRAGMA writable_schema = RESET	0	\N
+202401290806.021	UPDATE sqlite_schema SET sql = replace(sql, 'dt_integer(8)', 'datetime') WHERE name = 'plugins' AND type = 'table'	0	\N
+202401290806.031	PRAGMA writable_schema = TRUE	0	\N
+202401290807	update devices set created_at = iif(typeof(created_at) in ('integer', 'real'), datetime(created_at, 'unixepoch', 'localtime'), created_at),updated_at = iif(typeof(updated_at) in ('integer', 'real'), datetime(updated_at, 'unixepoch', 'localtime'), updated_at)	1	\N
+202401290807.011	PRAGMA writable_schema = RESET	0	\N
+202401290807.021	UPDATE sqlite_schema SET sql = replace(sql, 'dt_integer(8)', 'datetime') WHERE name = 'devices' AND type = 'table'	0	\N
+202401290807.031	PRAGMA writable_schema = TRUE	0	\N
+202401290808	update statistics_resources set at = iif(typeof(at) in ('integer', 'real'), datetime(at, 'unixepoch', 'localtime'), at)	1	\N
+202401290808.011	update statistics_media set at = iif(typeof(at) in ('integer', 'real'), datetime(at, 'unixepoch', 'localtime'), at)	0	\N
+202401290808.021	update statistics_bandwidth set at = iif(typeof(at) in ('integer', 'real'), datetime(at, 'unixepoch', 'localtime'), at)	0	\N
+202401290808.031	PRAGMA writable_schema = RESET	0	\N
+202401290808.041	UPDATE sqlite_schema SET sql = replace(sql, 'dt_integer(8)', 'datetime') WHERE name = 'statistics_resources' AND type = 'table'	0	\N
+202401290808.051	UPDATE sqlite_schema SET sql = replace(sql, 'dt_integer(8)', 'datetime') WHERE name = 'statistics_media' AND type = 'table'	0	\N
+202401290808.061	UPDATE sqlite_schema SET sql = replace(sql, 'dt_integer(8)', 'datetime') WHERE name = 'statistics_bandwidth' AND type = 'table'	0	\N
+202401290808.071	PRAGMA writable_schema = TRUE	0	\N
+202402260802	update library_timeline_entries set updated_at = iif(typeof(updated_at) in ('integer', 'real'), datetime(updated_at, 'unixepoch', 'localtime'), updated_at)	1	\N
+202402260802.011	PRAGMA writable_schema = RESET	0	\N
+202402260802.021	UPDATE sqlite_schema SET sql = replace(sql, 'dt_integer(8)', 'datetime') WHERE name = 'library_timeline_entries' AND type = 'table'	0	\N
+202402260802.031	PRAGMA writable_schema = TRUE	0	\N
+202402260803	update media_metadata_mappings set created_at = iif(typeof(created_at) in ('integer', 'real'), datetime(created_at, 'unixepoch', 'localtime'), created_at),updated_at = iif(typeof(updated_at) in ('integer', 'real'), datetime(updated_at, 'unixepoch', 'localtime'), updated_at)	1	\N
+202402260803.011	PRAGMA writable_schema = RESET	0	\N
+202402260803.021	UPDATE sqlite_schema SET sql = replace(sql, 'dt_integer(8)', 'datetime') WHERE name = 'media_metadata_mappings' AND type = 'table'	0	\N
+202402260803.031	PRAGMA writable_schema = TRUE	0	\N
+202403110800	select 1	0	\N
+202403120800	\N	\N	\N
+202404300800	\N	\N	\N
+202406050800	\N	\N	\N
+202406250800	\N	\N	\N
+202407231422	\N	\N	\N
+20240718114400	UPDATE library_sections SET agent = 'com.plexapp.agents.none', language = 'en' WHERE agent = 'tv.plex.agents.none' AND section_type = 13	0	
+202407301359	UPDATE library_sections SET agent = 'com.plexapp.agents.none', scanner = 'Plex Music Scanner', language = 'xn' WHERE agent = 'tv.plex.agents.none' AND scanner = 'Plex Music'	0	
+202407301359.011	UPDATE library_sections SET agent = 'com.plexapp.agents.none', scanner = 'Plex Series Scanner', language = 'xn' WHERE agent = 'tv.plex.agents.none' AND scanner = 'Plex TV Series'	0	
+202407301359.021	UPDATE library_sections SET agent = 'com.plexapp.agents.none', scanner = 'Plex Movie Scanner', language = 'xn' WHERE agent = 'tv.plex.agents.none' AND scanner = 'Plex Movie'	0	
+202409201238	select 1	0	
+20210207150001	select 1	0	\N
+20210207150002	select 1	1	\N
+20210207150000	select 1	0	\N
+202302020000	select 1	0	\N
+202502171508	\N	\N	\N
+202503041220	\N	\N	\N
+202503041514	\N	\N	\N
+202504160804	\N	\N	\N
+202504161541	CREATE INDEX 'index_accounts_on_name' ON 'accounts' ('name')	0	
+202504161541.011	ALTER TABLE 'accounts' ADD 'salt' varchar(255)	0	
+202504161541.021	ALTER TABLE 'accounts' ADD 'hashed_password' varchar(255)	0	
+202504211423	\N	\N	\N
+202504241552	CREATE TABLE IF NOT EXISTS 'media_metadata_mappings' ('id' INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, 'media_guid' varchar(255), 'metadata_guid' varchar(255), 'created_at' dt_integer(8), 'updated_at' dt_integer(8));	0	
+202504301225	CREATE INDEX 'index_library_timeline_entries_on_updated_at' ON 'library_timeline_entries' ('updated_at' )	0	
+202504301225.011	CREATE INDEX 'index_library_timeline_entries_on_state' ON 'library_timeline_entries' ('state' )	0	
+202504301225.021	CREATE INDEX 'index_library_timeline_entries_on_metadata_item_id' ON 'library_timeline_entries' ('metadata_item_id' )	0	
+202504301225.031	CREATE INDEX 'index_library_timeline_entries_on_library_section_id' ON 'library_timeline_entries' ('library_section_id' )	0	
+202504301225.041	CREATE TABLE IF NOT EXISTS 'library_timeline_entries' ('id' INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, 'library_section_id' integer, 'metadata_item_id' integer, 'state' integer, 'updated_at' dt_integer(8))	0	
+202505261219	select 1	1	
+202507011200	\N	\N	\N
+202507311200	\N	\N	\N
+\.
+
+
+--
+-- PostgreSQL database dump complete
+--
+
+\unrestrict RgMZNQiGswc5GaeFy9akDnvWbouqV1tBBvr5dZBigwjZf307CZedb9Jz1Jq2OEo
 

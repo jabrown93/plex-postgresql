@@ -1,48 +1,86 @@
 # Dockerfile for plex-postgresql
-# Build with glibc (same as linuxserver/plex base) for compatibility
+# Build with Alpine 3.15 which has musl 1.2.2 - same as Plex's bundled musl!
 
-FROM linuxserver/plex:latest AS builder
+FROM alpine:3.15 AS builder
 
 # Install build dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    libsqlite3-dev \
-    libpq-dev \
-    && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache \
+    build-base \
+    sqlite-dev \
+    linux-headers \
+    curl \
+    perl
+
+# Verify musl version matches Plex (1.2.2)
+RUN /lib/ld-musl-*.so.1 --version 2>&1 | head -2
 
 WORKDIR /build
+
+# Download and build PostgreSQL with minimal features (just libpq)
+RUN curl -L https://ftp.postgresql.org/pub/source/v15.10/postgresql-15.10.tar.gz | tar xz
+RUN cd postgresql-15.10 && \
+    # Configure WITHOUT OpenSSL to avoid ENGINE symbol conflicts
+    ./configure --prefix=/usr/local/pgsql \
+        --without-readline \
+        --without-zlib \
+        --without-openssl \
+        --without-icu && \
+    # Build and install include files first
+    cd src/include && make install && \
+    # Build and install libpq
+    cd ../interfaces/libpq && make && make install && \
+    # Build pg_config for headers
+    cd ../../bin/pg_config && make && make install
+
+# Copy source files
 COPY src/ src/
 COPY include/ include/
 
-# Build shim with glibc, statically link libpq
-RUN gcc -shared -fPIC -o db_interpose_pg.so \
+# Build shim with musl 1.2.2 (same as Plex) - include debug symbols
+# Use rpath to find libpq in our lib directory
+RUN gcc -shared -fPIC -g -o db_interpose_pg.so \
     src/db_interpose_pg_linux.c \
     src/sql_translator.c src/sql_tr_helpers.c src/sql_tr_placeholders.c \
     src/sql_tr_functions.c src/sql_tr_query.c src/sql_tr_groupby.c \
     src/sql_tr_types.c src/sql_tr_quotes.c src/sql_tr_keywords.c \
     src/sql_tr_upsert.c src/pg_config.c src/pg_logging.c \
     src/pg_client.c src/pg_statement.c \
-    -I/usr/include/postgresql -Iinclude -Isrc \
-    -lpq -lsqlite3 -lpthread -Wl,-rpath,/usr/lib
+    -I/usr/local/pgsql/include -I/usr/include -Iinclude -Isrc \
+    -L/usr/local/pgsql/lib -lpq \
+    -ldl -lpthread \
+    -Wl,-rpath,/usr/local/lib/plex-postgresql
 
+# Check dependencies
+RUN echo "=== Shim dependencies ===" && (LD_LIBRARY_PATH=/usr/local/pgsql/lib ldd db_interpose_pg.so || true)
+
+# Gather libraries
+RUN mkdir -p /libs && \
+    cp db_interpose_pg.so /libs/ && \
+    cp /usr/local/pgsql/lib/libpq.so.5* /libs/ && \
+    ls -la /libs/
+
+# Runtime stage
 FROM linuxserver/plex:latest
 
-# Install runtime dependencies
+# Install PostgreSQL client for health checks and sqlite3 for schema fixes
 RUN apt-get update && apt-get install -y --no-install-recommends \
     postgresql-client \
-    libpq5 \
+    sqlite3 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy shim
 RUN mkdir -p /usr/local/lib/plex-postgresql
-COPY --from=builder /build/db_interpose_pg.so /usr/local/lib/plex-postgresql/
 
-# Copy schema file
+# Create symlinks for musl compatibility
+# Our shim was built with Alpine which expects libc.musl-aarch64.so.1
+# but Plex bundles musl as libc.so
+RUN ln -sf /usr/lib/plexmediaserver/lib/libc.so /usr/local/lib/plex-postgresql/libc.musl-aarch64.so.1
+
+COPY --from=builder /libs/*.so* /usr/local/lib/plex-postgresql/
+
 COPY schema/plex_schema.sql /usr/local/lib/plex-postgresql/
+COPY schema/sqlite_schema.sql /usr/local/lib/plex-postgresql/
 
-# Copy and setup custom entrypoint
 COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-# Use custom entrypoint
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

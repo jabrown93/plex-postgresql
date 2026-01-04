@@ -36,6 +36,7 @@ static const struct { const char *pattern; size_t len; } SQLITE_SKIP_PATTERNS[] 
     {"ANALYZE sqlite_", 15},
     {"ATTACH DATABASE", 15},
     {"DETACH DATABASE", 15},
+    // Transactions skipped - pool doesn't track connection-per-transaction
     {"BEGIN", 5},
     {"COMMIT", 6},
     {"ROLLBACK", 8},
@@ -53,8 +54,7 @@ static const char *ANYWHERE_SKIP_PATTERNS[] = {
     // "fts5",  -- Enable FTS translation
     "spellfix",
     "icu_load_collation",
-    "typeof(",
-    "last_insert_rowid()",
+    // typeof() and last_insert_rowid() are translated by sql_translator, not skipped
     NULL
 };
 

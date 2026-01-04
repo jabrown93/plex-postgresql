@@ -40,7 +40,7 @@ services:
       - PLEX_PG_SCHEMA=plex
       - PLEX_PG_POOL_SIZE=50
       # Logging: 0=ERROR, 1=INFO, 2=DEBUG
-      - PLEX_PG_LOG_LEVEL=1
+      - PLEX_PG_LOG_LEVEL=INFO
     volumes:
       - plex_config:/config
       # Uncomment and edit to mount your media

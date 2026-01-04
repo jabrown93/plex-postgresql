@@ -9,6 +9,20 @@
 #define SQL_TRANSLATOR_H
 
 #include <stddef.h>
+#include <strings.h>  // for strncasecmp
+
+// ============================================================================
+// Safe strcasestr implementation
+// musl's strcasestr has issues with certain inputs, so we use our own
+// ============================================================================
+
+char* safe_strcasestr(const char *haystack, const char *needle);
+
+// Replace system strcasestr with our safe version
+#ifdef strcasestr
+#undef strcasestr
+#endif
+#define strcasestr safe_strcasestr
 
 // Translation result
 typedef struct {

@@ -99,8 +99,21 @@ sudo ./scripts/uninstall_wrappers_linux.sh
 
 ### Docker (WIP)
 
-Docker has glibc/musl compatibility issues with linuxserver/plex.
-Use native install for now.
+Docker builds successfully but the shim has runtime issues that need debugging.
+
+```bash
+# Build and run
+docker-compose up -d
+
+# Check logs
+docker-compose logs -f plex
+```
+
+**Known Issues:**
+- Shim loads correctly, but Plex crashes during database initialization
+- Debugging in progress
+
+Use native Linux install for now if you need a working setup.
 
 ## Configuration
 

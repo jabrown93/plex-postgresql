@@ -208,11 +208,15 @@ pg_connection_t* pg_find_connection(sqlite3 *db) {
     for (int i = 0; i < MAX_CONNECTIONS; i++) {
         if (connections[i] && connections[i]->shadow_db == db) {
             pg_connection_t *handle_conn = connections[i];
+            // CRITICAL FIX: Copy path before unlocking to prevent use-after-free
+            char path_copy[512];
+            strncpy(path_copy, handle_conn->db_path, sizeof(path_copy) - 1);
+            path_copy[sizeof(path_copy) - 1] = '\0';
             pthread_mutex_unlock(&connections_mutex);
 
             // For library.db, use pooled connection instead
-            if (is_library_db(handle_conn->db_path)) {
-                pg_connection_t *pool_conn = pool_get_connection(handle_conn->db_path);
+            if (is_library_db(path_copy)) {
+                pg_connection_t *pool_conn = pool_get_connection(path_copy);
                 if (pool_conn && pool_conn->is_pg_active) {
                     // Track this db->pool mapping for cleanup on close
                     pthread_mutex_lock(&pool_mutex);
