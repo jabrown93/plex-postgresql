@@ -343,8 +343,9 @@ char* translate_json_each(const char *sql) {
 
     *out = '\0';
 
-    // Fix references to the value column
-    char *temp = str_replace(result, " value FROM json_array_elements", " (value::text)::integer FROM json_array_elements");
+    // Fix references to the value column - use text to avoid type mismatch
+    // Note: For integer columns, the column side is cast to text in fix_integer_text_mismatch
+    char *temp = str_replace(result, " value FROM json_array_elements", " value::text FROM json_array_elements");
     if (temp) {
         free(result);
         result = temp;

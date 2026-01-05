@@ -191,6 +191,17 @@ char* sql_translate_functions(const char *sql) {
         }
     }
 
+    // Final pass: Fix any remaining integer/text mismatches after all translations
+    // This catches json_array_elements patterns that were just created
+    if (strcasestr(current, "json_array_elements")) {
+        LOG_INFO("Final pass: checking json_array_elements for type mismatches");
+        temp = fix_integer_text_mismatch(current);
+        if (temp) {
+            free(current);
+            current = temp;
+        }
+    }
+
     return current;
 }
 

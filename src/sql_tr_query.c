@@ -770,20 +770,46 @@ char* strip_icu_collation(const char *sql) {
 char* fix_integer_text_mismatch(const char *sql) {
     if (!sql) return NULL;
 
-    // Pattern: metadata_items.id IN (SELECT taggings.metadata_item_id
-    // Fix: Cast BOTH sides to text to ensure type equality regardless of underlying types.
-    // metadata_items.id::text IN (SELECT taggings.metadata_item_id::text
+    char *current = strdup(sql);
+    if (!current) return NULL;
+    char *temp;
 
-    // We match the specific join pattern to be safe, then replace the IN clause structure.
-    if (strcasestr(sql, "metadata_items.id in (select taggings.metadata_item_id")) {
-        LOG_INFO("Fixing integer/text mismatch in SQL: %.100s...", sql);
-        char *temp = str_replace_nocase(sql,
-            "metadata_items.id in (select taggings.metadata_item_id",
-            "metadata_items.id::text in (select taggings.metadata_item_id::text");
-        return temp ? temp : strdup(sql);
+    // Debug: log what we're checking
+    if (strcasestr(current, "taggings") && strcasestr(current, "json_array_elements")) {
+        LOG_INFO("fix_integer_text_mismatch checking taggings query: %.300s", current);
     }
 
-    return strdup(sql);
+    // Pattern 1: metadata_items.id IN (SELECT taggings.metadata_item_id
+    if (strcasestr(current, "metadata_items.id in (select taggings.metadata_item_id")) {
+        LOG_INFO("Fixing integer/text mismatch pattern 1");
+        temp = str_replace_nocase(current,
+            "metadata_items.id in (select taggings.metadata_item_id",
+            "metadata_items.id::text in (select taggings.metadata_item_id::text");
+        if (temp) { free(current); current = temp; }
+    }
+
+    // Pattern 2: metadata_item_id IN (SELECT ... FROM json_array_elements
+    // metadata_item_id is INTEGER, value::text is TEXT - cast column to text
+    // Match both backticks (SQLite style) and double quotes (translated style)
+    if (strcasestr(current, "`metadata_item_id` in") && strcasestr(current, "json_array_elements")) {
+        LOG_INFO("Fixing integer/text mismatch pattern 2a (metadata_item_id backtick)");
+        temp = str_replace_nocase(current,
+            "`metadata_item_id` in",
+            "`metadata_item_id`::text in");
+        if (temp) { free(current); current = temp; }
+    }
+    if (strcasestr(current, "\"metadata_item_id\" in") && strcasestr(current, "json_array_elements")) {
+        LOG_INFO("Fixing integer/text mismatch pattern 2b (metadata_item_id quote)");
+        temp = str_replace_nocase(current,
+            "\"metadata_item_id\" in",
+            "\"metadata_item_id\"::text in");
+        if (temp) { free(current); current = temp; }
+    }
+
+    // Note: Pattern 3 (tag_id) removed - tag_id compares with tg.id (both INTEGER)
+    // Only metadata_item_id directly compares with json_array_elements values
+
+    return current;
 }
 
 // ============================================================================
