@@ -129,6 +129,15 @@ char* sql_translate_functions(const char *sql) {
     // 15d. Fix JSON operator ->> on TEXT columns
     TRANSLATE(fix_json_operator_on_text);
 
+    // 15e. IFNULL -> COALESCE (PostgreSQL uses COALESCE)
+    if (strcasestr(current, "IFNULL")) {
+        char *temp = str_replace_nocase(current, "IFNULL", "COALESCE");
+        if (temp && temp != current) {
+            free(current);
+            current = temp;
+        }
+    }
+
     // 16. Fix incomplete GROUP BY for specific queries - this runs BEFORE fix_group_by_strict_complete
     // so we can't rely on the full GROUP BY clause being present yet
     // Just do nothing here and let fix_group_by_strict_complete handle it
