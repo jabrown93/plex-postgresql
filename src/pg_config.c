@@ -55,9 +55,14 @@ static const char *ANYWHERE_SKIP_PATTERNS[] = {
     "spellfix",
     "icu_load_collation",
     // typeof() and last_insert_rowid() are translated by sql_translator, not skipped
-    // Dynamic column update (no-op: SET $col=$col)
+    // Dynamic column update (no-op: SET $col=$col) - PostgreSQL placeholders
     "SET $2=$2",
     "SET $1=$1",
+    // Dynamic column update (no-op: SET :col=:col) - SQLite named placeholders
+    "SET :2=:2",
+    "SET :1=:1",
+    // Generic dynamic column patterns
+    ":col=:col",
     NULL
 };
 

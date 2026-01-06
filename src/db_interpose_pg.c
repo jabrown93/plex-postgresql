@@ -1027,7 +1027,9 @@ static int my_sqlite3_step(sqlite3_stmt *pStmt) {
             const char *sql = expanded_sql ? expanded_sql : sqlite3_sql(pStmt);
 
             // Handle cached WRITE
-            if (sql && is_write_operation(sql) && !should_skip_sql(sql)) {
+            // Check both expanded SQL and original SQL for skip patterns
+            const char *orig_sql = sqlite3_sql(pStmt);
+            if (sql && is_write_operation(sql) && !should_skip_sql(sql) && !should_skip_sql(orig_sql)) {
                 // Debug: log cached INSERT for metadata_items
                 if (sql && strcasestr(sql, "INSERT") && strcasestr(sql, "metadata_items")) {
                     LOG_ERROR("CACHED INSERT metadata_items:");
