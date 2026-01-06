@@ -1715,6 +1715,16 @@ int sqlite3_step(sqlite3_stmt *pStmt) {
                 return SQLITE_DONE;
             }
 
+            // CRITICAL FIX: Check original SQL for skip patterns (e.g., SET $2=$2)
+            // The expanded SQL has bound values, but original SQL has placeholders
+            const char *orig_sql = sqlite3_sql(pStmt);
+            if (orig_sql && should_skip_sql(orig_sql)) {
+                LOG_DEBUG("STEP WRITE: Skipping due to original SQL pattern: %.100s", orig_sql);
+                pg_stmt->write_executed = 1;
+                pthread_mutex_unlock(&pg_stmt->mutex);
+                return SQLITE_DONE;
+            }
+
             // Log INSERT on play_queue_generators for debugging
             if (pg_stmt->pg_sql && strstr(pg_stmt->pg_sql, "play_queue_generators")) {
                 LOG_INFO("INSERT play_queue_generators on thread %p conn %p",
