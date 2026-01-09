@@ -55,7 +55,7 @@ DB_INTERPOSE_OBJS = $(DB_INTERPOSE_CORE) $(DB_INTERPOSE_SHARED)
 OBJECTS = $(SQL_TR_OBJS) $(PG_MODULES) $(DB_INTERPOSE_OBJS) src/fishhook.o
 LINUX_OBJECTS = $(SQL_TR_OBJS) $(PG_MODULES) $(DB_INTERPOSE_SHARED) src/db_interpose_core_linux.o
 
-.PHONY: all clean install test macos linux run stop
+.PHONY: all clean install test macos linux run stop unit-test test-recursion
 
 all: $(TARGET)
 
@@ -216,3 +216,24 @@ stop:
 	@pkill -9 -f "Plex Media Server" 2>/dev/null || true
 	@pkill -9 -f "Plex Plug-in" 2>/dev/null || true
 	@echo "Plex stopped"
+
+# ============================================================================
+# Unit Tests
+# ============================================================================
+
+TEST_DIR = tests/src
+TEST_BIN_DIR = tests/bin
+
+# Test for recursion prevention and stack protection
+$(TEST_BIN_DIR)/test_recursion: $(TEST_DIR)/test_recursion.c
+	@mkdir -p $(TEST_BIN_DIR)
+	$(CC) -o $@ $< -lpthread -Wall -Wextra
+
+test-recursion: $(TEST_BIN_DIR)/test_recursion
+	@echo ""
+	@./$(TEST_BIN_DIR)/test_recursion
+	@echo ""
+
+# Run all unit tests
+unit-test: test-recursion
+	@echo "All unit tests complete."

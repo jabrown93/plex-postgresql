@@ -32,6 +32,9 @@ scanner_wrapper
 *.db-wal
 *.db-shm
 
+# Test binaries
+tests/bin/
+
 # Backup files
 *.backup
 *.bak
