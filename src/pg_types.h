@@ -45,15 +45,16 @@
 #define POOL_SIZE_MAX 200
 #define POOL_SIZE_DEFAULT 150
 
-// Prepared statement cache size per connection
-#define STMT_CACHE_SIZE 256
+// Prepared statement cache size per connection (must be power of 2 for hash table)
+#define STMT_CACHE_SIZE 512
+#define STMT_CACHE_MASK (STMT_CACHE_SIZE - 1)
 
 // ============================================================================
-// Prepared Statement Cache (per-connection)
+// Prepared Statement Cache (per-connection, hash table with linear probing)
 // ============================================================================
 
 typedef struct {
-    uint64_t sql_hash;           // FNV-1a hash of SQL string
+    uint64_t sql_hash;           // FNV-1a hash of SQL string (0 = empty slot)
     char stmt_name[32];          // "ps_<hash>" - PostgreSQL statement name
     int param_count;             // Number of parameters
     int prepared;                // 1 = prepared on this connection
@@ -62,7 +63,7 @@ typedef struct {
 
 typedef struct {
     prepared_stmt_cache_entry_t entries[STMT_CACHE_SIZE];
-    int count;
+    int count;                   // Number of entries (for stats)
 } stmt_cache_t;
 
 // ============================================================================

@@ -1146,18 +1146,28 @@ uint64_t pg_hash_sql(const char *sql) {
     return hash;
 }
 
-// Lookup statement in cache by hash
+// Lookup statement in cache by hash (O(1) average with linear probing)
 // Returns 1 if found (stmt_name set), 0 if not found
 int pg_stmt_cache_lookup(pg_connection_t *conn, uint64_t sql_hash, const char **stmt_name) {
-    if (!conn || !stmt_name) return 0;
+    if (!conn || !stmt_name || sql_hash == 0) return 0;
 
     stmt_cache_t *cache = &conn->stmt_cache;
-
-    for (int i = 0; i < cache->count; i++) {
-        if (cache->entries[i].sql_hash == sql_hash && cache->entries[i].prepared) {
-            // Update last_used for LRU
-            cache->entries[i].last_used = time(NULL);
-            *stmt_name = cache->entries[i].stmt_name;
+    int start_idx = (int)(sql_hash & STMT_CACHE_MASK);
+    
+    // Linear probing - check up to STMT_CACHE_SIZE slots
+    for (int probe = 0; probe < STMT_CACHE_SIZE; probe++) {
+        int idx = (start_idx + probe) & STMT_CACHE_MASK;
+        prepared_stmt_cache_entry_t *entry = &cache->entries[idx];
+        
+        if (entry->sql_hash == 0) {
+            // Empty slot - not found
+            return 0;
+        }
+        
+        if (entry->sql_hash == sql_hash && entry->prepared) {
+            // Found it
+            entry->last_used = time(NULL);
+            *stmt_name = entry->stmt_name;
             return 1;
         }
     }
@@ -1165,62 +1175,77 @@ int pg_stmt_cache_lookup(pg_connection_t *conn, uint64_t sql_hash, const char **
     return 0;
 }
 
-// Add statement to cache
+// Add statement to cache (O(1) average with linear probing)
 // Returns index of entry, or -1 on failure
 int pg_stmt_cache_add(pg_connection_t *conn, uint64_t sql_hash, const char *stmt_name, int param_count) {
-    if (!conn || !stmt_name) return -1;
+    if (!conn || !stmt_name || sql_hash == 0) return -1;
 
     stmt_cache_t *cache = &conn->stmt_cache;
-
-    // Check if already exists (update it)
-    for (int i = 0; i < cache->count; i++) {
-        if (cache->entries[i].sql_hash == sql_hash) {
-            cache->entries[i].prepared = 1;
-            cache->entries[i].param_count = param_count;
-            cache->entries[i].last_used = time(NULL);
-            strncpy(cache->entries[i].stmt_name, stmt_name, sizeof(cache->entries[i].stmt_name) - 1);
-            cache->entries[i].stmt_name[sizeof(cache->entries[i].stmt_name) - 1] = '\0';
-            LOG_DEBUG("Updated prepared statement in cache: %s (hash=%llx)", stmt_name, (unsigned long long)sql_hash);
-            return i;
+    int start_idx = (int)(sql_hash & STMT_CACHE_MASK);
+    int oldest_idx = -1;
+    time_t oldest_time = 0;
+    
+    // Linear probing - find existing or empty slot
+    for (int probe = 0; probe < STMT_CACHE_SIZE; probe++) {
+        int idx = (start_idx + probe) & STMT_CACHE_MASK;
+        prepared_stmt_cache_entry_t *entry = &cache->entries[idx];
+        
+        // Track oldest entry for potential eviction
+        if (oldest_idx == -1 || (entry->sql_hash != 0 && entry->last_used < oldest_time)) {
+            oldest_idx = idx;
+            oldest_time = entry->last_used;
+        }
+        
+        if (entry->sql_hash == sql_hash) {
+            // Already exists - update it
+            entry->prepared = 1;
+            entry->param_count = param_count;
+            entry->last_used = time(NULL);
+            strncpy(entry->stmt_name, stmt_name, sizeof(entry->stmt_name) - 1);
+            entry->stmt_name[sizeof(entry->stmt_name) - 1] = '\0';
+            LOG_DEBUG("Updated prepared statement in cache: %s (hash=%llx, idx=%d)", stmt_name, (unsigned long long)sql_hash, idx);
+            return idx;
+        }
+        
+        if (entry->sql_hash == 0) {
+            // Empty slot - use it
+            entry->sql_hash = sql_hash;
+            entry->param_count = param_count;
+            entry->prepared = 1;
+            entry->last_used = time(NULL);
+            strncpy(entry->stmt_name, stmt_name, sizeof(entry->stmt_name) - 1);
+            entry->stmt_name[sizeof(entry->stmt_name) - 1] = '\0';
+            cache->count++;
+            LOG_DEBUG("Added prepared statement to cache: %s (hash=%llx, idx=%d)", stmt_name, (unsigned long long)sql_hash, idx);
+            return idx;
         }
     }
-
-    // Need to add new entry
-    int idx;
-    if (cache->count < STMT_CACHE_SIZE) {
-        // Room available
-        idx = cache->count++;
-    } else {
-        // Cache full - evict LRU entry
-        idx = 0;
-        time_t oldest = cache->entries[0].last_used;
-        for (int i = 1; i < STMT_CACHE_SIZE; i++) {
-            if (cache->entries[i].last_used < oldest) {
-                oldest = cache->entries[i].last_used;
-                idx = i;
-            }
-        }
-
+    
+    // Cache full - evict oldest entry
+    if (oldest_idx >= 0) {
+        prepared_stmt_cache_entry_t *entry = &cache->entries[oldest_idx];
+        
         // Deallocate the old prepared statement on PostgreSQL
-        if (cache->entries[idx].prepared && conn->conn) {
+        if (entry->prepared && conn->conn) {
             char dealloc[64];
-            snprintf(dealloc, sizeof(dealloc), "DEALLOCATE %s", cache->entries[idx].stmt_name);
+            snprintf(dealloc, sizeof(dealloc), "DEALLOCATE %s", entry->stmt_name);
             PGresult *res = PQexec(conn->conn, dealloc);
             if (res) PQclear(res);
-            LOG_DEBUG("Evicted prepared statement from cache: %s", cache->entries[idx].stmt_name);
+            LOG_DEBUG("Evicted prepared statement from cache: %s", entry->stmt_name);
         }
+        
+        // Fill in the new entry
+        entry->sql_hash = sql_hash;
+        entry->param_count = param_count;
+        entry->prepared = 1;
+        entry->last_used = time(NULL);
+        strncpy(entry->stmt_name, stmt_name, sizeof(entry->stmt_name) - 1);
+        entry->stmt_name[sizeof(entry->stmt_name) - 1] = '\0';
+        LOG_DEBUG("Added prepared statement (evicted): %s (hash=%llx, idx=%d)", stmt_name, (unsigned long long)sql_hash, oldest_idx);
+        return oldest_idx;
     }
 
-    // Fill in the entry
-    cache->entries[idx].sql_hash = sql_hash;
-    cache->entries[idx].param_count = param_count;
-    cache->entries[idx].prepared = 1;
-    cache->entries[idx].last_used = time(NULL);
-    strncpy(cache->entries[idx].stmt_name, stmt_name, sizeof(cache->entries[idx].stmt_name) - 1);
-    cache->entries[idx].stmt_name[sizeof(cache->entries[idx].stmt_name) - 1] = '\0';
-
-    LOG_DEBUG("Added prepared statement to cache: %s (hash=%llx, idx=%d)", stmt_name, (unsigned long long)sql_hash, idx);
-    return idx;
+    return -1;
 }
 
 // Clear all cached statements for a connection (called on disconnect/reset)
@@ -1231,8 +1256,8 @@ void pg_stmt_cache_clear(pg_connection_t *conn) {
 
     // Deallocate all prepared statements on PostgreSQL
     if (conn->conn) {
-        for (int i = 0; i < cache->count; i++) {
-            if (cache->entries[i].prepared) {
+        for (int i = 0; i < STMT_CACHE_SIZE; i++) {
+            if (cache->entries[i].sql_hash != 0 && cache->entries[i].prepared) {
                 char dealloc[64];
                 snprintf(dealloc, sizeof(dealloc), "DEALLOCATE %s", cache->entries[i].stmt_name);
                 PGresult *res = PQexec(conn->conn, dealloc);
@@ -1241,7 +1266,7 @@ void pg_stmt_cache_clear(pg_connection_t *conn) {
         }
     }
 
-    // Clear the cache
+    // Clear the cache (all slots to empty)
     memset(cache, 0, sizeof(stmt_cache_t));
     LOG_DEBUG("Cleared prepared statement cache for connection %p", (void*)conn);
 }
