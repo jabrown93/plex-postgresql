@@ -1,12 +1,13 @@
 #!/bin/bash
-# Install Plex wrapper scripts for PostgreSQL shim
+# Install Plex wrapper scripts for PostgreSQL shim (macOS)
 # This replaces the Plex binaries with wrapper scripts that inject the shim
+# For Linux, use install_wrappers_linux.sh
 
 set -e
 
-PLEX_APP="/Applications/Plex Media Server.app/Contents/MacOS"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SHIM_DIR="$(dirname "$SCRIPT_DIR")"
+PLEX_APP="/Applications/Plex Media Server.app/Contents/MacOS"
 SHIM_PATH="$SHIM_DIR/db_interpose_pg.dylib"
 SQLITE_DB="$HOME/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db"
 
