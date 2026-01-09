@@ -193,7 +193,8 @@ int my_sqlite3_prepare_v2_internal(sqlite3 *db, const char *zSql, int nByte,
     // If recursion is too deep, bail out immediately to prevent stack overflow
     // Normal operations should never recurse more than 5-10 times
     // The crash on 2026-01-06 showed 218 recursive frames!
-    if (prepare_v2_depth > 100) {
+    // Reduced from 100 to 50: 50 levels × 2KB = 100KB reserved for recursion
+    if (prepare_v2_depth > 50) {
         LOG_ERROR("RECURSION LIMIT: prepare_v2 called %d times (depth=%d)!",
                   prepare_v2_depth, prepare_v2_depth);
         LOG_ERROR("  This indicates infinite recursion - ABORTING to prevent crash");
@@ -217,41 +218,57 @@ int my_sqlite3_prepare_v2_internal(sqlite3 *db, const char *zSql, int nByte,
 #else
     // Linux: use pthread_attr_getstack via pthread_getattr_np
     pthread_attr_t attr;
+    void *stack_bottom = NULL;
     if (pthread_getattr_np(self, &attr) == 0) {
-        pthread_attr_getstack(&attr, &stack_addr, &stack_size);
+        pthread_attr_getstack(&attr, &stack_bottom, &stack_size);
         // On Linux, stack_addr is the BOTTOM of the stack
         // Adjust to get the TOP (where stack starts)
-        stack_addr = (char*)stack_addr + stack_size;
+        stack_addr = (char*)stack_bottom + stack_size;
         pthread_attr_destroy(&attr);
     }
 #endif
 
     // Calculate stack base and current position
     char *stack_base = (char*)stack_addr;
-    char local_var;
-    char *current_stack = &local_var;
+    volatile char local_var;  // volatile prevents compiler optimization
+    char *current_stack = (char*)&local_var;
 
     // Calculate how much stack we've used
     // Stack grows downward on both macOS/ARM64 and Linux
     ptrdiff_t stack_used = stack_base - current_stack;
     if (stack_used < 0) stack_used = -stack_used;
 
+#ifndef __APPLE__
+    // Linux sanity check: verify current_stack is within stack bounds
+    if (stack_bottom && stack_addr) {
+        if (current_stack < (char*)stack_bottom || current_stack > (char*)stack_addr) {
+            LOG_ERROR("STACK CALCULATION ERROR: current=%p not in [%p, %p]",
+                     (void*)current_stack, stack_bottom, stack_addr);
+            // Fall back to safe defaults - don't trigger protection on bad calculation
+            stack_size = 8 * 1024 * 1024;  // Assume 8MB
+            stack_used = 0;
+        }
+    }
+#endif
+
     // Calculate how much stack is left
     ptrdiff_t stack_remaining = (ptrdiff_t)stack_size - stack_used;
 
-    // WORKER THREAD DELEGATION (DISABLED):
-    // Worker delegation was causing crashes - the worker thread gets stuck or
-    // causes race conditions. Instead, just use a lower threshold and hope
-    // the query doesn't need too much stack.
-    // TODO: Fix worker thread synchronization properly
-    #if 0
+    // DEBUG: Log stack info periodically to verify protection is active
+    static __thread int stack_log_counter = 0;
+    if (++stack_log_counter == 1 || stack_log_counter % 1000 == 0) {
+        LOG_INFO("STACK_CHECK: size=%ldKB used=%ldKB remaining=%ldKB (threshold=64KB)",
+                 (long)stack_size/1024, (long)stack_used/1024, (long)stack_remaining/1024);
+    }
+
+    // WORKER THREAD DELEGATION:
+    // Delegate to 8MB stack worker thread when main thread stack is low
     if (!from_worker && stack_remaining < WORKER_DELEGATION_THRESHOLD && worker_running) {
-        LOG_INFO("WORKER DELEGATION: stack_remaining=%ld bytes < %d, delegating to worker",
+        LOG_DEBUG("WORKER DELEGATION: stack_remaining=%ld bytes < %d, delegating to 8MB worker",
                  (long)stack_remaining, WORKER_DELEGATION_THRESHOLD);
         prepare_v2_depth--;  // Worker will increment again
         return delegate_prepare_to_worker(db, zSql, nByte, ppStmt, pzTail);
     }
-    #endif
 
     // CRITICAL FIX: OnDeck queries with low stack cause Plex to crash AFTER query completes
     // When stack < 100KB, Plex's Metal initialization (for thumbnails) crashes in dyld
@@ -312,8 +329,9 @@ int my_sqlite3_prepare_v2_internal(sqlite3 *db, const char *zSql, int nByte,
         return rc;
     }
 
-    // Use a very low threshold - 8KB minimum (very risky but needed for Plex)
-    int stack_threshold = from_worker ? 8000 : 8000;
+    // Hard stack threshold - increased from 8KB to 64KB for safety
+    // 64KB gives SQLite enough room for simple queries without crashing
+    int stack_threshold = from_worker ? 32000 : 64000;
 
     if (stack_remaining < stack_threshold) {
         // For PostgreSQL-destined read queries, use a minimal SQLite query
@@ -418,7 +436,7 @@ int my_sqlite3_prepare_v2_internal(sqlite3 *db, const char *zSql, int nByte,
 
     // DEBUG: Log queries with backticks (the failing OnDeck query pattern)
     if (strchr(zSql, '`')) {
-        LOG_INFO("BACKTICK_QUERY: skip_complex=%d len=%d sql=%.200s",
+        LOG_DEBUG("BACKTICK_QUERY: skip_complex=%d len=%d sql=%.200s",
                  skip_complex_processing, (int)strlen(zSql), zSql);
     }
 

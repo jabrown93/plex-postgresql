@@ -48,6 +48,10 @@ void pg_query_cache_store(pg_stmt_t *stmt, void *result);
 // Invalidate cache entry for a statement (call on reset/finalize)
 void pg_query_cache_invalidate(pg_stmt_t *stmt);
 
+// Release a cached result (decrement ref_count)
+// MUST be called when pg_stmt->cached_result is cleared
+void pg_query_cache_release(cached_result_t *entry);
+
 // Compute cache key from statement SQL and bound parameters
 uint64_t pg_query_cache_key(pg_stmt_t *stmt);
 

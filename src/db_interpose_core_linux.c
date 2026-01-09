@@ -337,7 +337,7 @@ int delegate_prepare_to_worker(sqlite3 *db, const char *zSql, int nByte,
         return SQLITE_ERROR;
     }
 
-    LOG_INFO("WORKER: Delegating query (%.100s)", zSql ? zSql : "NULL");
+    LOG_DEBUG("WORKER: Delegating query (%.100s)", zSql ? zSql : "NULL");
 
     pthread_mutex_lock(&worker_mutex);
 
@@ -367,7 +367,7 @@ int delegate_prepare_to_worker(sqlite3 *db, const char *zSql, int nByte,
 
     pthread_mutex_unlock(&worker_mutex);
 
-    LOG_INFO("WORKER: Delegation complete, rc=%d", result);
+    LOG_DEBUG("WORKER: Delegation complete, rc=%d", result);
     return result;
 }
 

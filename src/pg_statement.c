@@ -6,6 +6,7 @@
 #include "pg_statement.h"
 #include "pg_logging.h"
 #include "pg_config.h"
+#include "pg_query_cache.h"
 #include "sql_translator.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -448,8 +449,11 @@ void pg_stmt_clear_result(pg_stmt_t *stmt) {
         PQclear(stmt->result);
         stmt->result = NULL;
     }
-    // Clear cached result pointer (cache entry lives in TLS, not freed here)
-    stmt->cached_result = NULL;
+    // Release cached result ref before clearing pointer
+    if (stmt->cached_result) {
+        pg_query_cache_release(stmt->cached_result);
+        stmt->cached_result = NULL;
+    }
     stmt->current_row = -1;
     stmt->num_rows = 0;
     stmt->num_cols = 0;

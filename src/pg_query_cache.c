@@ -9,6 +9,7 @@
 #include <string.h>
 #include <time.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <libpq-fe.h>
 
 #include "pg_query_cache.h"
@@ -37,9 +38,15 @@ static uint64_t fnv1a_hash(const void *data, size_t len) {
     return hash;
 }
 
-// Free a single cached result
+// Free a single cached result (only if ref_count is 0)
 static void free_cached_result(cached_result_t *entry) {
     if (!entry || entry->cache_key == 0) return;
+
+    // Don't free if still referenced
+    if (atomic_load(&entry->ref_count) > 0) {
+        LOG_DEBUG("CACHE_FREE_SKIP: entry still has %d refs", atomic_load(&entry->ref_count));
+        return;
+    }
 
     // Free column types
     if (entry->col_types) {
@@ -183,20 +190,21 @@ cached_result_t* pg_query_cache_lookup(pg_stmt_t *stmt) {
         if (entry->cache_key == key) {
             // Check TTL
             if (now - entry->created_ms < QUERY_CACHE_TTL_MS) {
-                // Cache hit!
+                // Cache hit! Increment ref_count to prevent eviction
+                atomic_fetch_add(&entry->ref_count, 1);
                 entry->hit_count++;
                 cache->total_hits++;
 
                 // Log every 100th hit to reduce spam
                 if (entry->hit_count % 100 == 1) {
-                    LOG_DEBUG("QUERY_CACHE HIT #%d: key=%llx rows=%d sql=%.60s",
+                    LOG_DEBUG("QUERY_CACHE HIT #%d: key=%llx rows=%d refs=%d sql=%.60s",
                              entry->hit_count, (unsigned long long)key,
-                             entry->num_rows, stmt->pg_sql);
+                             entry->num_rows, atomic_load(&entry->ref_count), stmt->pg_sql);
                 }
 
                 return entry;
             } else {
-                // Expired - free and return miss
+                // Expired - try to free (will skip if ref_count > 0)
                 free_cached_result(entry);
                 cache->total_misses++;
                 return NULL;
@@ -339,6 +347,7 @@ void pg_query_cache_store(pg_stmt_t *stmt, void *result_ptr) {
     // Success - fill in metadata
     entry->cache_key = key;
     entry->created_ms = get_time_ms();
+    atomic_store(&entry->ref_count, 0);  // Initialize ref_count
     entry->num_rows = num_rows;
     entry->num_cols = num_cols;
     entry->hit_count = 0;
@@ -381,4 +390,15 @@ void pg_query_cache_stats(uint64_t *hits, uint64_t *misses) {
 
     if (hits) *hits = cache->total_hits;
     if (misses) *misses = cache->total_misses;
+}
+
+void pg_query_cache_release(cached_result_t *entry) {
+    if (!entry) return;
+
+    int old_count = atomic_fetch_sub(&entry->ref_count, 1);
+    if (old_count <= 1) {
+        // ref_count is now 0 or less - entry can be freed on next eviction
+        LOG_DEBUG("CACHE_RELEASE: entry %p now has 0 refs, eligible for eviction",
+                 (void*)entry);
+    }
 }

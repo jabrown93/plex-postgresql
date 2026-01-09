@@ -282,7 +282,8 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                 // Cache hit set current_row=0, so second step increments to 1, etc.
                 pg_stmt->current_row++;
                 if (pg_stmt->current_row >= pg_stmt->num_rows) {
-                    // Done with cached result
+                    // Done with cached result - release ref
+                    pg_query_cache_release(pg_stmt->cached_result);
                     pg_stmt->cached_result = NULL;
                     pg_stmt->read_done = 1;
                     pthread_mutex_unlock(&pg_stmt->mutex);
@@ -315,7 +316,7 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                 // QUERY RESULT CACHE: Check if we have cached results
                 // This is critical for Plex's OnDeck which runs 2000+ identical queries
                 // ============================================================
-                #if 0  // DISABLED - cache causes crashes
+                #if 1  // ENABLED - fixed with reference counting
                 LOG_DEBUG("CACHE_LOOKUP: checking cache for sql=%.60s", pg_stmt->pg_sql ? pg_stmt->pg_sql : "NULL");
                 cached_result_t *cached = pg_query_cache_lookup(pg_stmt);
                 LOG_DEBUG("CACHE_LOOKUP: result=%p", (void*)cached);
@@ -394,7 +395,7 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
 
                 // Use prepared statements for better performance (skip parse/plan overhead)
                 if (pg_stmt->use_prepared && pg_stmt->stmt_name[0]) {
-                    LOG_INFO("PREPARED PATH: use_prepared=%d stmt_name=%s sql=%.60s",
+                    LOG_DEBUG("PREPARED PATH: use_prepared=%d stmt_name=%s sql=%.60s",
                              pg_stmt->use_prepared, pg_stmt->stmt_name, pg_stmt->pg_sql);
                     const char *cached_name = NULL;
                     int is_cached = pg_stmt_cache_lookup(exec_conn, pg_stmt->sql_hash, &cached_name);

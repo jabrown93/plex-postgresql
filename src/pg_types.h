@@ -132,6 +132,7 @@ typedef struct {
 typedef struct cached_result {
     uint64_t cache_key;     // Hash of SQL + params
     uint64_t created_ms;    // Timestamp when cached
+    atomic_int ref_count;   // Reference count - don't free while > 0
     int num_rows;
     int num_cols;
     Oid *col_types;         // PostgreSQL type OIDs per column
