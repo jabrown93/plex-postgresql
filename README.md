@@ -22,6 +22,29 @@ SQLite is great for most Plex installations, but has one major limitation: **dat
 - **Large libraries** - PostgreSQL's query optimizer handles 10K+ movies and 50K+ episodes efficiently.
 - **Standard tooling** - pg_dump for backups, replication, any PostgreSQL client for debugging.
 
+## Benchmark Results
+
+Real-world test: **Plex + Kometa + PMM + 4 concurrent streams** (7 separate processes, 15 seconds):
+
+| Metric | SQLite | PostgreSQL |
+|--------|--------|------------|
+| **Write Errors** | **281,095** | **0** |
+| Playback write success rate | 0% | 100% |
+| Kometa errors | 140,817 | 0 |
+| PMM errors | 135,080 | 0 |
+
+**What this means:**
+- SQLite: Watch progress not saved during scans (100% failure)
+- SQLite: ~1.1 million errors per minute under load
+- PostgreSQL: Zero errors, everything works simultaneously
+
+Run the benchmark yourself:
+```bash
+python3 scripts/benchmark_multiprocess.py
+```
+
+For rclone/Real-Debrid setups with Kometa/PMM, **SQLite becomes unusable** during library scans. PostgreSQL handles it without issues.
+
 ## Quick Start (Docker)
 
 The easiest way to run Plex with PostgreSQL:
@@ -234,15 +257,36 @@ This prevents stack overflow crashes that occurred with deep recursive queries (
 Run unit tests to validate the shim:
 
 ```bash
-# All unit tests (recursion, crash scenarios)
+# All unit tests (77 tests total)
 make unit-test
 
-# Stack protection test (macOS only, doesn't require Plex running)
-make test-stack-macos
+# Individual test suites
+make test-recursion      # Recursion guards, loop detection (11 tests)
+make test-crash          # Production crash scenarios (21 tests)
+make test-sql            # SQL translation (22 tests)
+make test-cache          # Query cache logic (16 tests)
+make test-tls            # Thread-local storage (7 tests)
 
-# Individual tests
-make test-recursion      # Hash functions, loop detection, recursion guards
-make test-crash          # Tests based on production crash history
+# Benchmarks
+make benchmark           # Shim component micro-benchmarks
+```
+
+### Benchmarks
+
+Compare SQLite vs PostgreSQL performance:
+
+```bash
+# Multi-process stress test (the definitive proof)
+python3 scripts/benchmark_multiprocess.py
+
+# Library scan + playback simulation
+python3 scripts/benchmark_plex_stress.py
+
+# Concurrent writers test
+python3 scripts/benchmark_locking.py
+
+# Query performance comparison
+python3 scripts/benchmark_compare.py
 ```
 
 The stack protection test validates all protection layers by simulating low-stack conditions without running Plex.
