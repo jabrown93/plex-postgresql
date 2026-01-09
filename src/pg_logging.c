@@ -32,6 +32,14 @@ static pthread_once_t logging_init_once = PTHREAD_ONCE_INIT;
 #define THROTTLE_SAMPLE_RATE 1000       // Log 1 in N queries when throttled
 #define THROTTLE_SUMMARY_INTERVAL 10    // Log summary every N seconds when throttled
 
+// Log rotation settings
+#define DEFAULT_LOG_MAX_SIZE (10 * 1024 * 1024)  // 10MB default
+#define ROTATION_CHECK_INTERVAL 100              // Check size every N log messages
+
+static size_t log_max_size = DEFAULT_LOG_MAX_SIZE;
+static char log_file_path[1024] = {0};           // Store path for rotation
+static atomic_long log_message_count = 0;        // Count messages for rotation check
+
 static atomic_long query_count = 0;           // Queries in current window
 static atomic_long query_count_total = 0;     // Total queries since throttle started
 static atomic_long suppressed_count = 0;      // Suppressed log entries
@@ -116,6 +124,51 @@ static int should_log_message(void) {
 }
 
 // ============================================================================
+// Log Rotation
+// ============================================================================
+
+static void rotate_log_file(void) {
+    if (!log_file || log_file == stdout || log_file == stderr) return;
+    if (log_file_path[0] == '\0') return;
+
+    // Get current file size
+    long current_size = ftell(log_file);
+    if (current_size < 0) {
+        fseek(log_file, 0, SEEK_END);
+        current_size = ftell(log_file);
+    }
+
+    if ((size_t)current_size < log_max_size) return;
+
+    // Need to rotate
+    pthread_mutex_lock(&log_mutex);
+
+    // Close current file
+    fclose(log_file);
+
+    // Build rotated filename (.1)
+    char rotated_path[1040];
+    snprintf(rotated_path, sizeof(rotated_path), "%s.1", log_file_path);
+
+    // Remove old .1 if exists, rename current to .1
+    remove(rotated_path);
+    rename(log_file_path, rotated_path);
+
+    // Open fresh log file
+    log_file = fopen(log_file_path, "a");
+    if (log_file) {
+        setbuf(log_file, NULL);  // Unbuffered
+        fprintf(log_file, "[LOG_ROTATION] Rotated log file (previous size: %ld bytes, max: %zu)\n",
+                current_size, log_max_size);
+        fflush(log_file);
+    } else {
+        log_file = stderr;
+    }
+
+    pthread_mutex_unlock(&log_mutex);
+}
+
+// ============================================================================
 // Initialization
 // ============================================================================
 
@@ -128,6 +181,22 @@ static void do_logging_init(void) {
         else current_log_level = PG_LOG_INFO;
     }
 
+    // Log Max Size from environment (e.g., "10M", "50M", "100K", or bytes)
+    const char *max_size_env = getenv(ENV_PG_LOG_MAX_SIZE);
+    if (max_size_env) {
+        char *endptr;
+        long size = strtol(max_size_env, &endptr, 10);
+        if (size > 0) {
+            if (*endptr == 'M' || *endptr == 'm') {
+                log_max_size = (size_t)size * 1024 * 1024;
+            } else if (*endptr == 'K' || *endptr == 'k') {
+                log_max_size = (size_t)size * 1024;
+            } else {
+                log_max_size = (size_t)size;
+            }
+        }
+    }
+
     // Log File from environment
     const char *file_env = getenv(ENV_PG_LOG_FILE);
     if (file_env) {
@@ -136,9 +205,11 @@ static void do_logging_init(void) {
         } else if (strcasecmp(file_env, "stderr") == 0) {
             log_file = stderr;
         } else {
+            strncpy(log_file_path, file_env, sizeof(log_file_path) - 1);
             log_file = fopen(file_env, "a");
         }
     } else {
+        strncpy(log_file_path, LOG_FILE, sizeof(log_file_path) - 1);
         log_file = fopen(LOG_FILE, "a");
     }
 
@@ -232,6 +303,11 @@ void pg_log_message_internal(int level, const char *fmt, ...) {
     pthread_mutex_unlock(&log_mutex);
 
     free(buffer);
+
+    // Periodic rotation check (every N messages to avoid overhead)
+    if (atomic_fetch_add(&log_message_count, 1) % ROTATION_CHECK_INTERVAL == 0) {
+        rotate_log_file();
+    }
 }
 
 // ============================================================================
