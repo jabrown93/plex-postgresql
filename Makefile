@@ -37,14 +37,23 @@ SQL_TR_OBJS = src/sql_translator.o src/sql_tr_helpers.o src/sql_tr_placeholders.
 # PG modules
 PG_MODULES = src/pg_config.o src/pg_logging.o src/pg_client.o src/pg_statement.o src/pg_query_cache.o
 
-# DB Interpose modules (split from db_interpose_pg.c for maintainability)
-DB_INTERPOSE_OBJS = src/db_interpose_core.o src/db_interpose_open.o src/db_interpose_exec.o \
-                    src/db_interpose_prepare.o src/db_interpose_bind.o src/db_interpose_step.o \
-                    src/db_interpose_column.o src/db_interpose_metadata.o
+# DB Interpose modules - shared between Mac and Linux
+DB_INTERPOSE_SHARED = src/db_interpose_open.o src/db_interpose_exec.o \
+                      src/db_interpose_prepare.o src/db_interpose_bind.o src/db_interpose_step.o \
+                      src/db_interpose_column.o src/db_interpose_metadata.o
+
+# Platform-specific core module
+ifeq ($(UNAME_S),Darwin)
+    DB_INTERPOSE_CORE = src/db_interpose_core.o
+else
+    DB_INTERPOSE_CORE = src/db_interpose_core_linux.o
+endif
+
+DB_INTERPOSE_OBJS = $(DB_INTERPOSE_CORE) $(DB_INTERPOSE_SHARED)
 
 # All objects (macOS includes fishhook, Linux doesn't)
 OBJECTS = $(SQL_TR_OBJS) $(PG_MODULES) $(DB_INTERPOSE_OBJS) src/fishhook.o
-LINUX_OBJECTS = $(SQL_TR_OBJS) $(PG_MODULES)
+LINUX_OBJECTS = $(SQL_TR_OBJS) $(PG_MODULES) $(DB_INTERPOSE_SHARED) src/db_interpose_core_linux.o
 
 .PHONY: all clean install test macos linux run stop
 
@@ -60,9 +69,9 @@ macos: $(OBJECTS)
 		-I/opt/homebrew/opt/postgresql@15/include -Iinclude -Isrc \
 		-L/opt/homebrew/opt/postgresql@15/lib -lpq
 
-# Explicit Linux build (uses refactored version with shared modules)
-linux: src/db_interpose_pg_linux.c $(LINUX_OBJECTS)
-	gcc -shared -fPIC -o db_interpose_pg.so src/db_interpose_pg_linux.c $(LINUX_OBJECTS) \
+# Explicit Linux build (modular - same structure as Mac)
+linux: $(LINUX_OBJECTS)
+	gcc -shared -fPIC -o db_interpose_pg.so $(LINUX_OBJECTS) \
 		-I/usr/include/postgresql -Iinclude -Isrc \
 		-lpq -lsqlite3 -ldl -lpthread
 
@@ -118,6 +127,9 @@ src/fishhook.o: src/fishhook.c include/fishhook.h
 
 # DB Interpose module compilation rules
 src/db_interpose_core.o: src/db_interpose_core.c src/db_interpose.h
+	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
+
+src/db_interpose_core_linux.o: src/db_interpose_core_linux.c src/db_interpose.h
 	$(CC) -c -fPIC -o $@ $< $(CFLAGS)
 
 src/db_interpose_open.o: src/db_interpose_open.c src/db_interpose.h

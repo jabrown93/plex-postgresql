@@ -10,7 +10,7 @@ A shim library that intercepts Plex's SQLite calls and redirects them to Postgre
 | Platform | Status |
 |----------|--------|
 | macOS | ✅ Production tested |
-| Linux (Docker) | ✅ Working (init & run tested, not production tested) |
+| Linux (Docker) | ✅ Production tested (65K+ items, full library queries) |
 | Linux (Native) | ⚠️ Untested |
 
 ## Why PostgreSQL?
@@ -150,6 +150,27 @@ sudo systemctl stop plexmediaserver
 sudo ./scripts/uninstall_wrappers_linux.sh
 ```
 
+## Migration from SQLite
+
+To migrate an existing Plex library to PostgreSQL:
+
+```bash
+# macOS
+./scripts/migrate_sqlite_to_pg.sh
+
+# Docker (mount source database first)
+docker exec plex-postgresql bash -c '
+  export PGHOST=postgres PGUSER=plex PGPASSWORD=plex PGDATABASE=plex
+  SQLITE_DB="/source-db/com.plexapp.plugins.library.db"
+
+  for TABLE in $(sqlite3 "$SQLITE_DB" ".tables"); do
+    COLS=$(sqlite3 "$SQLITE_DB" "PRAGMA table_info($TABLE);" | cut -d"|" -f2 | tr "\n" ",")
+    sqlite3 -header -csv "$SQLITE_DB" "SELECT * FROM $TABLE;" > /tmp/$TABLE.csv
+    psql -c "\\copy plex.$TABLE($COLS) FROM /tmp/$TABLE.csv WITH CSV HEADER"
+  done
+'
+```
+
 ## Configuration
 
 | Variable | Default | Description |
@@ -173,12 +194,27 @@ Docker: Plex → SQLite API → LD_PRELOAD shim    → SQL Translator → Postgr
 
 The shim intercepts all `sqlite3_*` calls, translates SQL syntax (placeholders, functions, types), and executes on PostgreSQL via libpq.
 
+### Architecture
+
+The codebase uses a modular architecture with platform-specific cores:
+
+```
+src/
+├── db_interpose_core.c        # macOS: DYLD_INTERPOSE + fishhook
+├── db_interpose_core_linux.c  # Linux: LD_PRELOAD + dlsym(RTLD_NEXT)
+├── db_interpose_*.c           # Shared: open, exec, prepare, bind, step, column, metadata
+├── sql_translator.c           # SQLite → PostgreSQL SQL translation
+├── sql_tr_*.c                 # Translation modules: functions, types, quotes, etc.
+└── pg_*.c                     # PostgreSQL client, connection pool, statement cache
+```
+
 ### Key Features
 
 - **Connection pooling** - Efficient reuse of PostgreSQL connections
 - **SQL translation** - Automatic SQLite → PostgreSQL syntax conversion
 - **Prepared statements** - Query caching for performance
 - **Schema initialization** - Auto-creates PostgreSQL schema on first run
+- **Circular reference protection** - Trigger prevents self-referential parent_id crashes
 
 ## Troubleshooting
 

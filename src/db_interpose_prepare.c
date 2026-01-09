@@ -207,8 +207,24 @@ int my_sqlite3_prepare_v2_internal(sqlite3 *db, const char *zSql, int nByte,
     // CRITICAL FIX: Stack overflow protection
     // Get thread stack bounds to detect how much stack we have left
     pthread_t self = pthread_self();
-    void *stack_addr = pthread_get_stackaddr_np(self);
-    size_t stack_size = pthread_get_stacksize_np(self);
+    void *stack_addr = NULL;
+    size_t stack_size = 0;
+
+#ifdef __APPLE__
+    // macOS: use non-portable pthread functions
+    stack_addr = pthread_get_stackaddr_np(self);
+    stack_size = pthread_get_stacksize_np(self);
+#else
+    // Linux: use pthread_attr_getstack via pthread_getattr_np
+    pthread_attr_t attr;
+    if (pthread_getattr_np(self, &attr) == 0) {
+        pthread_attr_getstack(&attr, &stack_addr, &stack_size);
+        // On Linux, stack_addr is the BOTTOM of the stack
+        // Adjust to get the TOP (where stack starts)
+        stack_addr = (char*)stack_addr + stack_size;
+        pthread_attr_destroy(&attr);
+    }
+#endif
 
     // Calculate stack base and current position
     char *stack_base = (char*)stack_addr;
@@ -216,7 +232,7 @@ int my_sqlite3_prepare_v2_internal(sqlite3 *db, const char *zSql, int nByte,
     char *current_stack = &local_var;
 
     // Calculate how much stack we've used
-    // Stack grows downward on macOS/ARM64
+    // Stack grows downward on both macOS/ARM64 and Linux
     ptrdiff_t stack_used = stack_base - current_stack;
     if (stack_used < 0) stack_used = -stack_used;
 

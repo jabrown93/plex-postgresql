@@ -38,13 +38,18 @@ COPY include/ include/
 
 # Build shim with musl 1.2.2 (same as Plex) - include debug symbols
 # Use rpath to find libpq in our lib directory
+# Now using modular build (same structure as Mac)
 RUN gcc -shared -fPIC -g -o db_interpose_pg.so \
-    src/db_interpose_pg_linux.c \
+    src/db_interpose_core_linux.c \
+    src/db_interpose_open.c src/db_interpose_exec.c \
+    src/db_interpose_prepare.c src/db_interpose_bind.c \
+    src/db_interpose_step.c src/db_interpose_column.c \
+    src/db_interpose_metadata.c \
     src/sql_translator.c src/sql_tr_helpers.c src/sql_tr_placeholders.c \
     src/sql_tr_functions.c src/sql_tr_query.c src/sql_tr_groupby.c \
     src/sql_tr_types.c src/sql_tr_quotes.c src/sql_tr_keywords.c \
     src/sql_tr_upsert.c src/pg_config.c src/pg_logging.c \
-    src/pg_client.c src/pg_statement.c \
+    src/pg_client.c src/pg_statement.c src/pg_query_cache.c \
     -I/usr/local/pgsql/include -I/usr/include -Iinclude -Isrc \
     -L/usr/local/pgsql/lib -lpq \
     -ldl -lpthread \

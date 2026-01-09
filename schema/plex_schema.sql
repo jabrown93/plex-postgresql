@@ -3711,6 +3711,31 @@ CREATE TRIGGER tags_search_update BEFORE INSERT OR UPDATE ON plex.tags FOR EACH 
 
 
 --
+-- Name: prevent_self_referential_parent(); Type: FUNCTION; Schema: plex; Owner: -
+-- Prevents TV shows (metadata_type=2) from having parent_id = id (circular reference)
+-- This caused infinite recursion crashes in Plex when using includeOnDeck=1
+--
+
+CREATE OR REPLACE FUNCTION plex.prevent_self_referential_parent() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NEW.metadata_type = 2 AND NEW.parent_id = NEW.id THEN
+        NEW.parent_id := NULL;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: metadata_items prevent_self_ref_parent; Type: TRIGGER; Schema: plex; Owner: -
+--
+
+CREATE TRIGGER prevent_self_ref_parent BEFORE INSERT OR UPDATE ON plex.metadata_items FOR EACH ROW EXECUTE FUNCTION plex.prevent_self_referential_parent();
+
+
+--
 -- PostgreSQL database dump complete
 --
 
