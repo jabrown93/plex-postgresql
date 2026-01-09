@@ -319,4 +319,23 @@ int my_sqlite3_create_collation_v2(sqlite3 *db, const char *zName, int eTextRep,
                                    int(*xCompare)(void*,int,const void*,int,const void*),
                                    void(*xDestroy)(void*));
 
+// ============================================================================
+// Memory and Statement Info Functions (db_interpose_metadata.c)
+// ============================================================================
+
+void my_sqlite3_free(void *ptr);
+void* my_sqlite3_malloc(int n);
+sqlite3* my_sqlite3_db_handle(sqlite3_stmt *pStmt);
+const char* my_sqlite3_sql(sqlite3_stmt *pStmt);
+int my_sqlite3_bind_parameter_count(sqlite3_stmt *pStmt);
+int my_sqlite3_stmt_readonly(sqlite3_stmt *pStmt);
+
+// Original function pointers (extern - defined in db_interpose_core.c)
+extern void (*orig_sqlite3_free)(void*);
+extern void* (*orig_sqlite3_malloc)(int);
+extern sqlite3* (*orig_sqlite3_db_handle)(sqlite3_stmt*);
+extern const char* (*orig_sqlite3_sql)(sqlite3_stmt*);
+extern int (*orig_sqlite3_bind_parameter_count)(sqlite3_stmt*);
+extern int (*orig_sqlite3_stmt_readonly)(sqlite3_stmt*);
+
 #endif /* DB_INTERPOSE_H */

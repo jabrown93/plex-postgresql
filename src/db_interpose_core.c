@@ -125,6 +125,14 @@ const void* (*orig_sqlite3_value_blob)(sqlite3_value*) = NULL;
 int (*orig_sqlite3_create_collation)(sqlite3*, const char*, int, void*, int(*)(void*,int,const void*,int,const void*)) = NULL;
 int (*orig_sqlite3_create_collation_v2)(sqlite3*, const char*, int, void*, int(*)(void*,int,const void*,int,const void*), void(*)(void*)) = NULL;
 
+// New SQLite API functions
+void (*orig_sqlite3_free)(void*) = NULL;
+void* (*orig_sqlite3_malloc)(int) = NULL;
+sqlite3* (*orig_sqlite3_db_handle)(sqlite3_stmt*) = NULL;
+const char* (*orig_sqlite3_sql)(sqlite3_stmt*) = NULL;
+int (*orig_sqlite3_bind_parameter_count)(sqlite3_stmt*) = NULL;
+int (*orig_sqlite3_stmt_readonly)(sqlite3_stmt*) = NULL;
+
 // Aliases for backward compatibility (used by prepare module)
 int (*real_sqlite3_prepare_v2)(sqlite3*, const char*, int, sqlite3_stmt**, const char**) = NULL;
 const char* (*real_sqlite3_errmsg)(sqlite3*) = NULL;
@@ -439,6 +447,14 @@ static void setup_fishhook_rebindings(void) {
         // Collation
         {"sqlite3_create_collation", my_sqlite3_create_collation, (void**)&orig_sqlite3_create_collation},
         {"sqlite3_create_collation_v2", my_sqlite3_create_collation_v2, (void**)&orig_sqlite3_create_collation_v2},
+
+        // Memory and statement info
+        {"sqlite3_free", my_sqlite3_free, (void**)&orig_sqlite3_free},
+        {"sqlite3_malloc", my_sqlite3_malloc, (void**)&orig_sqlite3_malloc},
+        {"sqlite3_db_handle", my_sqlite3_db_handle, (void**)&orig_sqlite3_db_handle},
+        {"sqlite3_sql", my_sqlite3_sql, (void**)&orig_sqlite3_sql},
+        {"sqlite3_bind_parameter_count", my_sqlite3_bind_parameter_count, (void**)&orig_sqlite3_bind_parameter_count},
+        {"sqlite3_stmt_readonly", my_sqlite3_stmt_readonly, (void**)&orig_sqlite3_stmt_readonly},
     };
 
     int count = sizeof(rebindings) / sizeof(rebindings[0]);

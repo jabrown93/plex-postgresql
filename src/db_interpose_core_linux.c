@@ -144,6 +144,11 @@ const void* (*orig_sqlite3_value_blob)(sqlite3_value*) = NULL;
 int (*orig_sqlite3_create_collation)(sqlite3*, const char*, int, void*, int(*)(void*,int,const void*,int,const void*)) = NULL;
 int (*orig_sqlite3_create_collation_v2)(sqlite3*, const char*, int, void*, int(*)(void*,int,const void*,int,const void*), void(*)(void*)) = NULL;
 
+// Additional SQLite API functions (free, db_handle, sql already defined above)
+void* (*orig_sqlite3_malloc)(int) = NULL;
+int (*orig_sqlite3_bind_parameter_count)(sqlite3_stmt*) = NULL;
+int (*orig_sqlite3_stmt_readonly)(sqlite3_stmt*) = NULL;
+
 // Aliases for backward compatibility (used by prepare module)
 int (*real_sqlite3_prepare_v2)(sqlite3*, const char*, int, sqlite3_stmt**, const char**) = NULL;
 const char* (*real_sqlite3_errmsg)(sqlite3*) = NULL;
@@ -441,6 +446,11 @@ static void load_original_functions(void) {
     orig_sqlite3_create_collation = dlsym(RTLD_NEXT, "sqlite3_create_collation");
     orig_sqlite3_create_collation_v2 = dlsym(RTLD_NEXT, "sqlite3_create_collation_v2");
 
+    // Additional SQLite API functions
+    orig_sqlite3_malloc = dlsym(RTLD_NEXT, "sqlite3_malloc");
+    orig_sqlite3_bind_parameter_count = dlsym(RTLD_NEXT, "sqlite3_bind_parameter_count");
+    orig_sqlite3_stmt_readonly = dlsym(RTLD_NEXT, "sqlite3_stmt_readonly");
+
     // Set up aliases for backward compatibility
     real_sqlite3_prepare_v2 = orig_sqlite3_prepare_v2;
     real_sqlite3_errmsg = orig_sqlite3_errmsg;
@@ -709,12 +719,9 @@ int sqlite3_data_count(sqlite3_stmt *pStmt) {
     return my_sqlite3_data_count(pStmt);
 }
 
-// sqlite3_db_handle - pass through to real SQLite (not intercepted)
+// sqlite3_db_handle - use my_ implementation for PG statement support
 sqlite3* sqlite3_db_handle(sqlite3_stmt *pStmt) {
-    if (orig_sqlite3_db_handle) {
-        return orig_sqlite3_db_handle(pStmt);
-    }
-    return NULL;
+    return my_sqlite3_db_handle(pStmt);
 }
 
 // sqlite3_expanded_sql - pass through to real SQLite
@@ -725,19 +732,29 @@ char* sqlite3_expanded_sql(sqlite3_stmt *pStmt) {
     return NULL;
 }
 
-// sqlite3_sql - pass through to real SQLite
+// sqlite3_sql - use my_ implementation for PG statement support
 const char* sqlite3_sql(sqlite3_stmt *pStmt) {
-    if (orig_sqlite3_sql) {
-        return orig_sqlite3_sql(pStmt);
-    }
-    return NULL;
+    return my_sqlite3_sql(pStmt);
 }
 
-// sqlite3_free - pass through to real SQLite
+// sqlite3_free - use my_ implementation
 void sqlite3_free(void *p) {
-    if (orig_sqlite3_free) {
-        orig_sqlite3_free(p);
-    }
+    my_sqlite3_free(p);
+}
+
+// sqlite3_malloc - use my_ implementation
+void* sqlite3_malloc(int n) {
+    return my_sqlite3_malloc(n);
+}
+
+// sqlite3_bind_parameter_count - use my_ implementation for PG statement support
+int sqlite3_bind_parameter_count(sqlite3_stmt *pStmt) {
+    return my_sqlite3_bind_parameter_count(pStmt);
+}
+
+// sqlite3_stmt_readonly - use my_ implementation for PG statement support
+int sqlite3_stmt_readonly(sqlite3_stmt *pStmt) {
+    return my_sqlite3_stmt_readonly(pStmt);
 }
 
 // sqlite3_bind_parameter_name - pass through to real SQLite

@@ -238,3 +238,100 @@ int my_sqlite3_create_collation_v2(
     // For other collations, pass through to real SQLite
     return orig_sqlite3_create_collation_v2 ? orig_sqlite3_create_collation_v2(db, zName, eTextRep, pArg, xCompare, xDestroy) : SQLITE_ERROR;
 }
+
+// ============================================================================
+// Memory Management
+// ============================================================================
+
+void my_sqlite3_free(void *ptr) {
+    // Just pass through to real SQLite - we don't allocate SQLite memory
+    if (orig_sqlite3_free) {
+        orig_sqlite3_free(ptr);
+    } else {
+        // Fallback to standard free if SQLite free not available
+        free(ptr);
+    }
+}
+
+void* my_sqlite3_malloc(int n) {
+    // Pass through to real SQLite
+    if (orig_sqlite3_malloc) {
+        return orig_sqlite3_malloc(n);
+    }
+    // Fallback to standard malloc
+    return malloc(n);
+}
+
+// ============================================================================
+// Statement Info Functions
+// ============================================================================
+
+sqlite3* my_sqlite3_db_handle(sqlite3_stmt *pStmt) {
+    if (!pStmt) return NULL;
+
+    // Check if this is one of our PostgreSQL statements
+    pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
+    if (pg_stmt && pg_stmt->is_pg == 2 && pg_stmt->conn) {
+        // Return the associated shadow db handle
+        return pg_stmt->conn->shadow_db;
+    }
+
+    // Pass through to real SQLite for non-PG statements
+    if (orig_sqlite3_db_handle) {
+        return orig_sqlite3_db_handle(pStmt);
+    }
+    return NULL;
+}
+
+const char* my_sqlite3_sql(sqlite3_stmt *pStmt) {
+    if (!pStmt) return NULL;
+
+    // Check if this is one of our PostgreSQL statements
+    pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
+    if (pg_stmt && pg_stmt->is_pg == 2) {
+        // Return the original SQL (before translation)
+        return pg_stmt->sql;
+    }
+
+    // Pass through to real SQLite for non-PG statements
+    if (orig_sqlite3_sql) {
+        return orig_sqlite3_sql(pStmt);
+    }
+    return NULL;
+}
+
+int my_sqlite3_bind_parameter_count(sqlite3_stmt *pStmt) {
+    if (!pStmt) return 0;
+
+    // Check if this is one of our PostgreSQL statements
+    pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
+    if (pg_stmt && pg_stmt->is_pg == 2) {
+        return pg_stmt->param_count;
+    }
+
+    // Pass through to real SQLite for non-PG statements
+    if (orig_sqlite3_bind_parameter_count) {
+        return orig_sqlite3_bind_parameter_count(pStmt);
+    }
+    return 0;
+}
+
+int my_sqlite3_stmt_readonly(sqlite3_stmt *pStmt) {
+    if (!pStmt) return 1;  // NULL treated as readonly (safe default)
+
+    // Check if this is one of our PostgreSQL statements
+    pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
+    if (pg_stmt && pg_stmt->is_pg == 2) {
+        // Use our is_read_operation check on the original SQL
+        if (pg_stmt->sql) {
+            return is_read_operation(pg_stmt->sql) ? 1 : 0;
+        }
+        return 1;  // Default to readonly if no SQL
+    }
+
+    // Pass through to real SQLite for non-PG statements
+    if (orig_sqlite3_stmt_readonly) {
+        return orig_sqlite3_stmt_readonly(pStmt);
+    }
+    return 1;  // Default to readonly
+}

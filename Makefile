@@ -292,6 +292,28 @@ $(TEST_BIN_DIR)/test_benchmark: $(TEST_DIR)/test_benchmark.c $(SQL_TR_OBJS) src/
 benchmark: $(TEST_BIN_DIR)/test_benchmark
 	@./$(TEST_BIN_DIR)/test_benchmark
 
+# SQLite API function tests (tests with shim loaded)
+$(TEST_BIN_DIR)/test_sqlite_api: $(TEST_DIR)/test_sqlite_api.c
+	@mkdir -p $(TEST_BIN_DIR)
+	$(CC) -o $@ $< -lsqlite3 -Wall -Wextra
+
+test-api: $(TARGET) $(TEST_BIN_DIR)/test_sqlite_api
+	@echo ""
+ifeq ($(UNAME_S),Darwin)
+	@DYLD_INSERT_LIBRARIES=./$(TARGET) \
+		PLEX_PG_HOST=/tmp \
+		PLEX_PG_DATABASE=plex \
+		PLEX_PG_USER=plex \
+		./$(TEST_BIN_DIR)/test_sqlite_api
+else
+	@LD_PRELOAD=./$(TARGET) \
+		PLEX_PG_HOST=localhost \
+		PLEX_PG_DATABASE=plex \
+		PLEX_PG_USER=plex \
+		./$(TEST_BIN_DIR)/test_sqlite_api
+endif
+	@echo ""
+
 # Run all unit tests
-unit-test: test-recursion test-crash test-sql test-cache test-tls
+unit-test: test-recursion test-crash test-sql test-cache test-tls test-api
 	@echo "All unit tests complete."
