@@ -38,6 +38,31 @@ typedef struct {
 
 static pg_connection_t *connections[MAX_CONNECTIONS];
 static pthread_mutex_t connections_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// ============================================================================
+// Connection Hash Table (O(1) lookup by sqlite3* handle)
+// ============================================================================
+
+#define CONN_HASH_BUCKETS 256  // Power of 2 for fast modulo
+
+typedef struct conn_hash_entry {
+    sqlite3 *db;                    // Key: sqlite3 handle
+    pg_connection_t *conn;          // Value: our connection wrapper
+    struct conn_hash_entry *next;   // Collision chain
+} conn_hash_entry_t;
+
+static conn_hash_entry_t *conn_hash_table[CONN_HASH_BUCKETS];
+// Note: conn_hash_table protected by connections_mutex (same lock as connections[])
+
+// Hash function for pointer values
+static inline uint32_t hash_ptr(const void *ptr) {
+    uintptr_t val = (uintptr_t)ptr;
+    // Mix bits for better distribution
+    val = ((val >> 16) ^ val) * 0x45d9f3b;
+    val = ((val >> 16) ^ val) * 0x45d9f3b;
+    val = (val >> 16) ^ val;
+    return (uint32_t)(val & (CONN_HASH_BUCKETS - 1));
+}
 static volatile int client_initialized = 0;
 static pthread_once_t client_init_once = PTHREAD_ONCE_INIT;
 
@@ -175,84 +200,135 @@ void pg_register_connection(pg_connection_t *conn) {
     if (!conn) return;
 
     pthread_mutex_lock(&connections_mutex);
+
+    // Add to array (for iteration/cleanup)
+    int slot = -1;
     for (int i = 0; i < MAX_CONNECTIONS; i++) {
         if (connections[i] == NULL) {
             connections[i] = conn;
-            LOG_DEBUG("Registered connection %p at slot %d", (void*)conn, i);
-            pthread_mutex_unlock(&connections_mutex);
-            return;
+            slot = i;
+            break;
         }
     }
+
+    if (slot < 0) {
+        pthread_mutex_unlock(&connections_mutex);
+        LOG_ERROR("Connection registry full! MAX_CONNECTIONS=%d", MAX_CONNECTIONS);
+        return;
+    }
+
+    // Add to hash table (for O(1) lookup)
+    if (conn->shadow_db) {
+        uint32_t bucket = hash_ptr(conn->shadow_db);
+        conn_hash_entry_t *entry = malloc(sizeof(conn_hash_entry_t));
+        if (entry) {
+            entry->db = conn->shadow_db;
+            entry->conn = conn;
+            entry->next = conn_hash_table[bucket];
+            conn_hash_table[bucket] = entry;
+        }
+    }
+
+    LOG_DEBUG("Registered connection %p at slot %d (hash bucket %u)",
+              (void*)conn, slot, conn->shadow_db ? hash_ptr(conn->shadow_db) : 0);
     pthread_mutex_unlock(&connections_mutex);
-    LOG_ERROR("Connection registry full! MAX_CONNECTIONS=%d", MAX_CONNECTIONS);
 }
 
 void pg_unregister_connection(pg_connection_t *conn) {
     if (!conn) return;
 
     pthread_mutex_lock(&connections_mutex);
+
+    // Remove from array
     for (int i = 0; i < MAX_CONNECTIONS; i++) {
         if (connections[i] == conn) {
             connections[i] = NULL;
-            LOG_DEBUG("Unregistered connection %p from slot %d", (void*)conn, i);
             break;
         }
     }
+
+    // Remove from hash table
+    if (conn->shadow_db) {
+        uint32_t bucket = hash_ptr(conn->shadow_db);
+        conn_hash_entry_t **pp = &conn_hash_table[bucket];
+        while (*pp) {
+            if ((*pp)->db == conn->shadow_db) {
+                conn_hash_entry_t *entry = *pp;
+                *pp = entry->next;
+                free(entry);
+                break;
+            }
+            pp = &(*pp)->next;
+        }
+    }
+
+    LOG_DEBUG("Unregistered connection %p", (void*)conn);
     pthread_mutex_unlock(&connections_mutex);
 }
 
 pg_connection_t* pg_find_connection(sqlite3 *db) {
     if (!db) return NULL;
 
-    // First, check the per-handle registry
+    // O(1) hash table lookup instead of O(n) linear scan
     pthread_mutex_lock(&connections_mutex);
-    for (int i = 0; i < MAX_CONNECTIONS; i++) {
-        if (connections[i] && connections[i]->shadow_db == db) {
-            pg_connection_t *handle_conn = connections[i];
-            // CRITICAL FIX: Copy path before unlocking to prevent use-after-free
-            char path_copy[512];
-            strncpy(path_copy, handle_conn->db_path, sizeof(path_copy) - 1);
-            path_copy[sizeof(path_copy) - 1] = '\0';
-            pthread_mutex_unlock(&connections_mutex);
 
-            // For library.db, use pooled connection instead
-            if (is_library_db(path_copy)) {
-                pg_connection_t *pool_conn = pool_get_connection(path_copy);
-                if (pool_conn && pool_conn->is_pg_active) {
-                    // Track this db->pool mapping for cleanup on close
-                    pthread_mutex_lock(&pool_mutex);
-                    int found = 0;
-                    for (int j = 0; j < db_to_pool_count; j++) {
-                        if (db_to_pool[j].db == db) {
-                            found = 1;
-                            break;
-                        }
-                    }
-                    if (!found && db_to_pool_count < MAX_CONNECTIONS) {
-                        // Find which pool slot we're using
-                        for (int j = 0; j < configured_pool_size; j++) {
-                            if (library_pool[j].conn == pool_conn) {
-                                db_to_pool[db_to_pool_count].db = db;
-                                db_to_pool[db_to_pool_count].pool_slot = j;
-                                db_to_pool_count++;
-                                LOG_DEBUG("Tracked db %p -> pool slot %d", (void*)db, j);
-                                break;
-                            }
-                        }
-                    }
-                    pthread_mutex_unlock(&pool_mutex);
-                    return pool_conn;
-                }
-                // Pool is full - return NULL to fall back to SQLite
-                // DO NOT return handle_conn as it has no real PG connection
-                LOG_DEBUG("Pool full for library.db, falling back to SQLite");
-                return NULL;
-            }
-            return handle_conn;
+    uint32_t bucket = hash_ptr(db);
+    conn_hash_entry_t *entry = conn_hash_table[bucket];
+    pg_connection_t *handle_conn = NULL;
+
+    while (entry) {
+        if (entry->db == db) {
+            handle_conn = entry->conn;
+            break;
         }
+        entry = entry->next;
     }
+
+    if (!handle_conn) {
+        pthread_mutex_unlock(&connections_mutex);
+        return NULL;
+    }
+
+    // CRITICAL FIX: Copy path before unlocking to prevent use-after-free
+    char path_copy[512];
+    strncpy(path_copy, handle_conn->db_path, sizeof(path_copy) - 1);
+    path_copy[sizeof(path_copy) - 1] = '\0';
     pthread_mutex_unlock(&connections_mutex);
-    return NULL;
+
+    // For library.db, use pooled connection instead
+    if (is_library_db(path_copy)) {
+        pg_connection_t *pool_conn = pool_get_connection(path_copy);
+        if (pool_conn && pool_conn->is_pg_active) {
+            // Track this db->pool mapping for cleanup on close
+            pthread_mutex_lock(&pool_mutex);
+            int found = 0;
+            for (int j = 0; j < db_to_pool_count; j++) {
+                if (db_to_pool[j].db == db) {
+                    found = 1;
+                    break;
+                }
+            }
+            if (!found && db_to_pool_count < MAX_CONNECTIONS) {
+                // Find which pool slot we're using
+                for (int j = 0; j < configured_pool_size; j++) {
+                    if (library_pool[j].conn == pool_conn) {
+                        db_to_pool[db_to_pool_count].db = db;
+                        db_to_pool[db_to_pool_count].pool_slot = j;
+                        db_to_pool_count++;
+                        LOG_DEBUG("Tracked db %p -> pool slot %d", (void*)db, j);
+                        break;
+                    }
+                }
+            }
+            pthread_mutex_unlock(&pool_mutex);
+            return pool_conn;
+        }
+        // Pool is full - return NULL to fall back to SQLite
+        // DO NOT return handle_conn as it has no real PG connection
+        LOG_DEBUG("Pool full for library.db, falling back to SQLite");
+        return NULL;
+    }
+    return handle_conn;
 }
 
 pg_connection_t* pg_find_any_library_connection(void) {
