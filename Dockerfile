@@ -85,6 +85,7 @@ COPY --from=builder /libs/*.so* /usr/local/lib/plex-postgresql/
 
 COPY schema/plex_schema.sql /usr/local/lib/plex-postgresql/
 COPY schema/sqlite_schema.sql /usr/local/lib/plex-postgresql/
+COPY scripts/migrate_lib.sh /usr/local/lib/plex-postgresql/
 
 COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh

@@ -4,6 +4,32 @@
 
 set -e
 
+# Migration library location (copied by Dockerfile)
+MIGRATE_LIB="/usr/local/lib/plex-postgresql/migrate_lib.sh"
+
+# Set up variables for migration library
+# Check for source database (mounted for migration) first, then container's own database
+if [[ -f "/source-db/com.plexapp.plugins.library.db" ]]; then
+    SQLITE_DB="/source-db/com.plexapp.plugins.library.db"
+    echo "Found source SQLite database for migration at /source-db"
+else
+    SQLITE_DB="/config/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db"
+fi
+PG_HOST="${PLEX_PG_HOST:-postgres}"
+PG_PORT="${PLEX_PG_PORT:-5432}"
+PG_DATABASE="${PLEX_PG_DATABASE:-plex}"
+PG_USER="${PLEX_PG_USER:-plex}"
+PG_SCHEMA="${PLEX_PG_SCHEMA:-plex}"
+SHIM_DIR="/usr/local/lib/plex-postgresql"
+
+# Non-interactive mode for Docker (auto-migrate if PG is empty)
+MIGRATION_INTERACTIVE="${MIGRATION_INTERACTIVE:-0}"
+
+# Source migration library if available
+if [[ -f "$MIGRATE_LIB" ]]; then
+    source "$MIGRATE_LIB"
+fi
+
 # Wait for PostgreSQL to be ready
 wait_for_postgres() {
     echo "Waiting for PostgreSQL at ${PLEX_PG_HOST}:${PLEX_PG_PORT}..."
@@ -131,6 +157,13 @@ echo "PostgreSQL: ${PLEX_PG_USER}@${PLEX_PG_HOST}:${PLEX_PG_PORT}/${PLEX_PG_DATA
 if [ -n "$PLEX_PG_HOST" ]; then
     wait_for_postgres
     init_schema
+
+    # Run migration if source SQLite DB exists (mounted via -v)
+    if [[ -f "$MIGRATE_LIB" ]] && [[ -f "$SQLITE_DB" ]]; then
+        echo "Checking for data migration..."
+        check_and_migrate || true
+    fi
+
     init_sqlite_schema
     setup_plex_shim
 else

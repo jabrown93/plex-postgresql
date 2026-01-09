@@ -43,8 +43,8 @@ services:
       - PLEX_PG_LOG_LEVEL=INFO
     volumes:
       - plex_config:/config
-      # Source Plex database for migration (uncomment and edit path)
-      # - /path/to/Plex Media Server/Plug-in Support/Databases:/source-db:ro
+      # Source Plex database for migration (mount your existing Plex database here)
+      - "${HOME}/Library/Application Support/Plex Media Server/Plug-in Support/Databases:/source-db:ro"
       # Uncomment and edit to mount your media
       # - /path/to/media:/media:ro
     ports:
