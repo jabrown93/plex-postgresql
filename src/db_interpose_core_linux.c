@@ -967,10 +967,11 @@ static void *real_sqlite_handle = NULL;
 
 static void load_original_functions(void) {
     // Try to load real SQLite from explicit path first
-    // This is needed when we replace Plex's libsqlite3.so with our shim
+    // Order matters: try renamed/backup copies first, then Plex's bundled version
     const char *sqlite_paths[] = {
-        "/usr/local/lib/plex-postgresql/libsqlite3_real.so",
-        "/usr/lib/plexmediaserver/lib/libsqlite3.so.original",
+        "/usr/local/lib/plex-postgresql/libsqlite3_real.so",      // Manual backup
+        "/usr/lib/plexmediaserver/lib/libsqlite3.so.original",    // Renamed original
+        "/usr/lib/plexmediaserver/lib/libsqlite3.so",             // Plex's bundled SQLite
         NULL
     };
 
