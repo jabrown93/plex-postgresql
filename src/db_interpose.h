@@ -190,6 +190,14 @@ int delegate_prepare_to_worker(sqlite3 *db, const char *zSql, int nByte,
 // Helper Functions (shared across modules)
 // ============================================================================
 
+// Global context tracking for exception debugging (NOT thread-local - TLS doesn't work reliably with musl)
+extern const char * volatile last_query_being_processed;
+extern const char * volatile last_column_being_accessed;
+
+// Global counters for debugging (NOT thread-local)
+extern volatile long global_value_type_calls;
+extern volatile long global_column_type_calls;
+
 // Check if a pointer is one of our fake values
 pg_fake_value_t* pg_check_fake_value(sqlite3_value *pVal);
 

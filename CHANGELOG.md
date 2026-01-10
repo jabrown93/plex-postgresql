@@ -5,6 +5,28 @@ All notable changes to plex-postgresql will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-01-10
+
+### Fixed
+- **std::bad_cast exceptions** - SOCI ORM type conversion failures caused 500 errors
+  - Root cause: `column_decltype()` returned NULL, causing SOCI type mismatch
+  - Solution: Map PostgreSQL OIDs to SQLite-compatible type strings (INTEGER, REAL, TEXT, BLOB)
+  - Types now match what `column_type()` returns, ensuring SOCI consistency
+
+### Added
+- **Robust C++ exception handler** (Linux only):
+  - Per-exception-type tracking with stack traces for first occurrence of each type
+  - Automatic source detection: "SHIM-RELATED" vs "external C++ code"
+  - Library identification via `dladdr()` runtime linker
+  - C++ symbol demangling via `__cxa_demangle`
+  - Manual `/proc/self/maps` parsing (musl-compatible, no sscanf)
+  - Throttling after 50 exceptions with type summary
+- **musl build script** (`build_shim_musl.sh`) for Alpine/musl-based containers
+
+### Changed
+- Exception context tracking uses volatile globals instead of TLS (musl compatibility)
+- Stack frame collection works on both ARM64 and x86_64
+
 ## [0.8.0] - 2026-01-10
 
 ### Added

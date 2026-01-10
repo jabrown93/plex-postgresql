@@ -450,10 +450,18 @@ int my_sqlite3_bind_parameter_index(sqlite3_stmt *pStmt, const char *zName) {
     // Check if this is one of our PostgreSQL statements
     pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
     if (pg_stmt && pg_stmt->is_pg == 2) {
+        // Strip leading : @ or $ from name for comparison
+        // SQLite bind_parameter_index expects :name, @name, or $name
+        // But we store just the name without prefix in param_names
+        const char *name_to_find = zName;
+        if (zName[0] == ':' || zName[0] == '@' || zName[0] == '$') {
+            name_to_find = zName + 1;
+        }
+
         // Search for the parameter name in our param_names array
         if (pg_stmt->param_names) {
             for (int i = 0; i < pg_stmt->param_count; i++) {
-                if (pg_stmt->param_names[i] && strcmp(pg_stmt->param_names[i], zName) == 0) {
+                if (pg_stmt->param_names[i] && strcmp(pg_stmt->param_names[i], name_to_find) == 0) {
                     LOG_DEBUG("BIND_PARAM_INDEX: found '%s' at index %d", zName, i + 1);
                     return i + 1;  // SQLite uses 1-based indexing
                 }

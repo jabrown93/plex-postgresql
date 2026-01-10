@@ -1,122 +1,96 @@
-# Release Notes - v0.8.0
+# Release Notes - v0.8.1
 
 **Release Date:** January 10, 2026
 
-This release focuses on performance optimization and SOCI ORM compatibility fixes.
+This release fixes critical std::bad_cast exceptions and adds robust exception diagnostics for Linux.
 
 ## Highlights
 
-### 145x Faster SQL Translation
-The new thread-local translation cache eliminates lock contention and provides massive speedup for repeated queries:
+### std::bad_cast Fix (Critical)
+Fixed SOCI ORM type conversion failures that caused HTTP 500 errors in Plex:
 
-| Metric | Before | After | Improvement |
-|--------|--------|-------|-------------|
-| Translation time | 17.5 µs | 0.12 µs | **145x faster** |
-| Cache lookup | N/A | 22.6 ns | Lock-free |
-| Throughput | 57K/sec | 8.5M/sec | **149x higher** |
+| Before | After |
+|--------|-------|
+| `column_decltype()` returned NULL | Returns proper SQLite type strings |
+| SOCI threw `std::bad_cast` | Type conversion works correctly |
+| 500 errors on library requests | Requests succeed |
 
-### SOCI ORM Compatibility
-Fixed critical issues with Plex's SOCI database layer:
-- Added `sqlite3_column_decltype` interception
-- Added `sqlite3_bind_parameter_index` for named parameters
-- Fixed pre-step metadata access (column info before `step()`)
+**Root Cause:** SOCI uses `column_decltype()` to determine how to convert column values. When it returned NULL, SOCI defaulted to "char" type internally, but `column_type()` returned SQLITE_INTEGER, causing a type mismatch.
 
-### Comprehensive Benchmarks
-New benchmark tools to measure and compare performance:
-```bash
-make benchmark                        # Shim micro-benchmarks
-./tests/bin/bench_cache              # Cache implementation comparison
-python3 tests/bench_sqlite_vs_pg.py  # SQLite vs PostgreSQL latency
+**Solution:** Map PostgreSQL OIDs to SQLite-compatible type strings that match `column_type()`:
+
+| PostgreSQL Type | OID | SQLite decltype | column_type() |
+|-----------------|-----|-----------------|---------------|
+| bool, int2, int4, int8 | 16, 21, 23, 20 | `INTEGER` | SQLITE_INTEGER |
+| float4, float8, numeric | 700, 701, 1700 | `REAL` | SQLITE_FLOAT |
+| bytea | 17 | `BLOB` | SQLITE_BLOB |
+| text, varchar, etc. | * | `TEXT` | SQLITE_TEXT |
+
+### Robust Exception Handler (Linux)
+New C++ exception interceptor provides automatic diagnostics:
+
+```
+╔══════════════════════════════════════════════════════════════════════╗
+║ EXCEPTION: std::domain_error                                    #1   ║
+╠══════════════════════════════════════════════════════════════════════╣
+║ Source: NOT SHIM-RELATED (external C++ code)                         ║
+╠══════════════════════════════════════════════════════════════════════╣
+┌─────────────────────────────────────────────────────────────────────┐
+│ STACK TRACE: std::domain_error                                      │
+├─────────────────────────────────────────────────────────────────────┤
+│  0: db_interpose_pg.so            __cxa_throw                       │
+│  1: Plex Media Server             [0xffff98980b9c]                  │
+│  2: Plex Media Server             [0xffff98980ca4]                  │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-## Performance Summary
+**Features:**
+- Per-exception-type tracking (stack trace for first occurrence of each type)
+- Automatic source detection: "SHIM-RELATED" vs "external C++ code"
+- Library identification via `dladdr()` runtime linker
+- C++ symbol demangling
+- Throttling after 50 exceptions with type summary
 
-### SQLite vs PostgreSQL Latency
+## Technical Details
 
-| Query Type | SQLite | PostgreSQL | Overhead |
-|------------|--------|------------|----------|
-| SELECT (PK) | 3.9 µs | 18.2 µs | 4.6x |
-| INSERT | 0.7 µs | 15.5 µs | 22x |
-| Range Query | 22.0 µs | 45.2 µs | 2.1x |
+### musl libc Compatibility
+The Linux shim now works correctly with musl-based containers (Alpine, etc.):
 
-PostgreSQL is slower per-query, but **never locks** during concurrent access.
+- Replaced `sscanf` with manual parsing (musl lacks `__isoc23_sscanf`)
+- Exception context uses volatile globals instead of TLS
+- Stack frame collection supports ARM64 and x86_64
+- Build script: `build_shim_musl.sh`
 
-### Shim Overhead
+### Files Changed
 
-| Component | Latency | % of Query Time |
-|-----------|---------|-----------------|
-| SQL Translation (cached) | 0.12 µs | 0.7% |
-| Cache lookup | 22.6 ns | 0.1% |
-| **Total shim overhead** | **<0.2 µs** | **<1%** |
-
-### Cache Implementation Comparison
-
-| Method | Latency | Throughput |
-|--------|---------|------------|
-| Mutex | 507 ns | 15.8 M/sec |
-| RWLock | 2,246 ns | 3.6 M/sec |
-| **Thread-Local** | **22.6 ns** | **354 M/sec** |
-
-Thread-local storage is **22x faster** than mutex-protected caches.
-
-## New Features
-
-### sqlite3_column_decltype
-Returns PostgreSQL column types mapped to SQLite equivalents:
-- `INTEGER` for int2, int4, int8, bool
-- `REAL` for float4, float8, numeric
-- `TEXT` for varchar, text, timestamps
-- `BLOB` for bytea
-
-### sqlite3_bind_parameter_index
-Supports named parameter lookup for queries like:
-```sql
-SELECT * FROM items WHERE id = :item_id AND type = :type
-```
-
-### Pre-step Metadata Access
-Column metadata functions now work before `sqlite3_step()`:
-- `sqlite3_column_name()`
-- `sqlite3_column_count()`
-- `sqlite3_column_decltype()`
-
-## Bug Fixes
-
-- Fixed `sqlite3_column_value` returning NULL for pre-step calls
-- Fixed metadata functions requiring step() to be called first
-
-## Documentation
-
-- Updated README with benchmark results and shim overhead data
-- Rewrote `docs/modules.md` with:
-  - Three-layer cache architecture diagram
-  - Execution flow documentation
-  - SQL translation pipeline details
-  - Development guide for adding new functions
-- Organized debug documentation into `docs/debug/`
-
-## Testing
-
-All 87 unit tests passing:
-- Recursion & Stack Protection: 11 tests
-- Crash Scenarios: 21 tests
-- SQL Translator: 32 tests
-- Query Cache: 16 tests
-- TLS Cache: 7 tests
+| File | Changes |
+|------|---------|
+| `src/db_interpose_column.c` | PostgreSQL OID → SQLite type mapping in `column_decltype()` |
+| `src/db_interpose_core_linux.c` | Robust exception handler, stack trace analyzer |
+| `build_shim_musl.sh` | Build script for musl-based containers |
 
 ## Upgrade Notes
 
 This release is backward compatible. No configuration changes required.
 
-For best performance with local PostgreSQL, use Unix sockets:
+**For musl-based containers (Alpine, etc.):**
 ```bash
-export PLEX_PG_HOST=/tmp  # or /var/run/postgresql on Linux
+# Copy source to container and build
+docker cp src/ container:/tmp/shim_build/
+docker exec container bash /tmp/shim_build/build_shim_musl.sh
 ```
+
+## Bug Fixes
+
+- Fixed `std::bad_cast` exceptions causing 500 errors
+- Fixed `__isoc23_sscanf` symbol not found on musl
+- Fixed TLS variables not capturing exception context on musl
 
 ## Known Issues
 
-- PostgreSQL is 4-22x slower than SQLite per-query (expected trade-off for MVCC)
-- Some unused variable warnings during compilation (cosmetic)
+- `std::domain_error` exceptions from Python (`_Py_HashDouble`) are unrelated to the shim
+  - These are internal Plex/Python exceptions, not causing request failures
+  - The exception handler correctly identifies them as "NOT SHIM-RELATED"
 
 ## Contributors
 

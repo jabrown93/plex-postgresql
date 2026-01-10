@@ -25,41 +25,618 @@
 #endif
 
 // ============================================================================
+// C++ Exception Interception (C-compatible)
+// ============================================================================
+// Intercept __cxa_throw to catch ALL C++ exceptions and log them with backtraces.
+// This is essential for debugging std::bad_cast and other exceptions.
+
+// Original __cxa_throw function pointer (noreturn attribute removed for cast compatibility)
+static void (*orig_cxa_throw)(void*, void*, void(*)(void*)) = NULL;
+
+// __cxa_demangle function pointer (loaded via dlsym)
+static char* (*cxa_demangle_fn)(const char*, char*, size_t*, int*) = NULL;
+
+// Counter for exception logging (to avoid infinite loops)
+static __thread int in_exception_handler = 0;
+
+// Global tracking of last query being processed (for exception context)
+// NOT thread-local because musl TLS doesn't work reliably across exception boundaries
+const char * volatile last_query_being_processed = NULL;
+const char * volatile last_column_being_accessed = NULL;
+
+// Global counters for debugging (NOT thread-local so visible across threads)
+volatile long global_value_type_calls = 0;
+volatile long global_column_type_calls = 0;
+
+// C++ std::type_info has a virtual method name() - we access it via the vtable
+// The first pointer in the object is the vtable, and name() is typically the first virtual method
+typedef struct {
+    void **vtable;  // Virtual table pointer
+} fake_type_info;
+
+static const char* get_type_name(void *tinfo) {
+    if (!tinfo) return "unknown";
+    // The name is stored after the vtable pointer in most implementations
+    // For Itanium ABI (used by GCC/Clang), the mangled name follows the vtable ptr
+    fake_type_info *ti = (fake_type_info *)tinfo;
+    // The name pointer is at offset 1 (after vtable)
+    const char **name_ptr = (const char **)((char *)ti + sizeof(void*));
+    return *name_ptr ? *name_ptr : "unknown";
+}
+
+// ============================================================================
+// Robust Stack Trace Analyzer
+// ============================================================================
+// Automatically resolves stack addresses to function names using:
+// 1. /proc/self/maps for library identification
+// 2. addr2line for symbol resolution (if available)
+// 3. dladdr as fallback for dynamic symbols
+
+#define MAX_STACK_FRAMES 32
+#define MAX_MAPS_ENTRIES 256
+
+// Memory map entry structure
+typedef struct {
+    unsigned long start;
+    unsigned long end;
+    unsigned long offset;  // File offset for the mapping
+    char perms[8];
+    char path[256];
+} map_entry_t;
+
+// Cached memory map (reloaded on each stack trace)
+static map_entry_t memory_map[MAX_MAPS_ENTRIES];
+static int memory_map_count = 0;
+
+// Parse hex number from string, returns pointer to next char after number
+static const char* parse_hex(const char *s, unsigned long *out) {
+    unsigned long val = 0;
+    while (*s) {
+        char c = *s;
+        if (c >= '0' && c <= '9') {
+            val = (val << 4) | (c - '0');
+        } else if (c >= 'a' && c <= 'f') {
+            val = (val << 4) | (c - 'a' + 10);
+        } else if (c >= 'A' && c <= 'F') {
+            val = (val << 4) | (c - 'A' + 10);
+        } else {
+            break;
+        }
+        s++;
+    }
+    *out = val;
+    return s;
+}
+
+// Skip whitespace
+static const char* skip_ws(const char *s) {
+    while (*s == ' ' || *s == '\t') s++;
+    return s;
+}
+
+// Load memory map from /proc/self/maps (using manual parsing to avoid sscanf/glibc issues)
+static void load_memory_map(void) {
+    memory_map_count = 0;
+
+    FILE *maps = fopen("/proc/self/maps", "r");
+    if (!maps) return;
+
+    char line[512];
+    while (fgets(line, sizeof(line), maps) && memory_map_count < MAX_MAPS_ENTRIES) {
+        map_entry_t *e = &memory_map[memory_map_count];
+
+        // Parse: start-end perms offset dev inode path
+        // Example: ffff80cf3000-ffff818ce000 r-xp 005c3000 00:50 252769 /usr/lib/plexmediaserver/Plex Media Server
+        const char *p = line;
+
+        // Parse start address
+        unsigned long start = 0;
+        p = parse_hex(p, &start);
+        if (*p != '-') continue;  // Invalid format
+        p++;
+
+        // Parse end address
+        unsigned long end = 0;
+        p = parse_hex(p, &end);
+        p = skip_ws(p);
+
+        // Parse permissions (4 chars like "r-xp")
+        char perms[8] = {0};
+        int pi = 0;
+        while (*p && *p != ' ' && pi < 7) {
+            perms[pi++] = *p++;
+        }
+        p = skip_ws(p);
+
+        // Parse offset
+        unsigned long offset = 0;
+        p = parse_hex(p, &offset);
+        p = skip_ws(p);
+
+        // Skip dev (xx:xx)
+        while (*p && *p != ' ') p++;
+        p = skip_ws(p);
+
+        // Skip inode
+        while (*p && *p != ' ') p++;
+        p = skip_ws(p);
+
+        // Rest is path (may be empty)
+        char path[256] = {0};
+        if (*p && *p != '\n') {
+            int plen = 0;
+            while (*p && *p != '\n' && plen < 255) {
+                path[plen++] = *p++;
+            }
+            path[plen] = '\0';
+        }
+
+        // Store entry
+        e->start = start;
+        e->end = end;
+        e->offset = offset;
+        strncpy(e->perms, perms, sizeof(e->perms) - 1);
+        if (path[0]) {
+            strncpy(e->path, path, sizeof(e->path) - 1);
+        } else {
+            strcpy(e->path, "[anonymous]");
+        }
+        memory_map_count++;
+    }
+
+    fclose(maps);
+}
+
+// Find which library contains an address
+static map_entry_t* find_map_entry(unsigned long addr) {
+    for (int i = 0; i < memory_map_count; i++) {
+        if (addr >= memory_map[i].start && addr < memory_map[i].end) {
+            return &memory_map[i];
+        }
+    }
+    return NULL;
+}
+
+// Get just the filename from a path
+static const char* get_basename(const char *path) {
+    const char *base = strrchr(path, '/');
+    return base ? base + 1 : path;
+}
+
+// Try to resolve symbol using addr2line (via popen)
+static int resolve_with_addr2line(const char *path, unsigned long offset,
+                                   char *func_out, size_t func_size,
+                                   char *file_out, size_t file_size) {
+    func_out[0] = '\0';
+    file_out[0] = '\0';
+
+    // Build addr2line command
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "addr2line -f -e '%s' 0x%lx 2>/dev/null", path, offset);
+
+    FILE *p = popen(cmd, "r");
+    if (!p) return 0;
+
+    // First line is function name
+    if (fgets(func_out, func_size, p)) {
+        // Remove trailing newline
+        size_t len = strlen(func_out);
+        if (len > 0 && func_out[len-1] == '\n') func_out[len-1] = '\0';
+
+        // Check if it's a valid result (not "??")
+        if (strcmp(func_out, "??") == 0) {
+            func_out[0] = '\0';
+        }
+    }
+
+    // Second line is file:line
+    if (fgets(file_out, file_size, p)) {
+        size_t len = strlen(file_out);
+        if (len > 0 && file_out[len-1] == '\n') file_out[len-1] = '\0';
+
+        // Check if it's a valid result (not "??:0" or "??:?")
+        if (strncmp(file_out, "??:", 3) == 0) {
+            file_out[0] = '\0';
+        }
+    }
+
+    pclose(p);
+    return func_out[0] != '\0';
+}
+
+// Try to resolve symbol using dladdr (for dynamic symbols)
+static int resolve_with_dladdr(void *addr, char *func_out, size_t func_size,
+                                char *lib_out, size_t lib_size) {
+    func_out[0] = '\0';
+    lib_out[0] = '\0';
+
+    Dl_info info;
+    if (dladdr(addr, &info)) {
+        if (info.dli_sname) {
+            // Try to demangle C++ names
+            if (cxa_demangle_fn) {
+                int status = 0;
+                char *demangled = cxa_demangle_fn(info.dli_sname, NULL, NULL, &status);
+                if (demangled) {
+                    strncpy(func_out, demangled, func_size - 1);
+                    free(demangled);
+                } else {
+                    strncpy(func_out, info.dli_sname, func_size - 1);
+                }
+            } else {
+                strncpy(func_out, info.dli_sname, func_size - 1);
+            }
+        }
+        if (info.dli_fname) {
+            strncpy(lib_out, get_basename(info.dli_fname), lib_size - 1);
+        }
+        return func_out[0] != '\0';
+    }
+    return 0;
+}
+
+// Collect stack frames using frame pointer walking
+static int collect_stack_frames(void **frames, int max_frames) {
+    int depth = 0;
+
+    // Method 1: Frame pointer walking (works on ARM64 with frame pointers)
+    void **fp = __builtin_frame_address(0);
+
+    // Safety: limit iterations and validate pointers
+    int iterations = 0;
+    while (fp && depth < max_frames && iterations < 100) {
+        iterations++;
+
+        // Validate frame pointer is in reasonable range
+        if ((unsigned long)fp < 0x1000 || (unsigned long)fp > 0xffffffffffff) break;
+
+        // On ARM64, return address is at fp+8 (LR saved after FP)
+        // On x86_64, return address is at fp+8 (after saved RBP)
+        void *ret_addr = NULL;
+
+        // Try to safely read the return address
+        // The layout is: [saved_fp][return_addr]
+        #if defined(__aarch64__)
+        ret_addr = *((void**)((char*)fp + 8));  // ARM64: LR at fp+8
+        #elif defined(__x86_64__)
+        ret_addr = *((void**)((char*)fp + 8));  // x86_64: return addr at rbp+8
+        #else
+        ret_addr = fp[1];  // Generic fallback
+        #endif
+
+        if (!ret_addr || (unsigned long)ret_addr < 0x1000) break;
+
+        frames[depth++] = ret_addr;
+
+        // Move to next frame
+        void **next_fp = (void**)*fp;
+
+        // Sanity checks
+        if (!next_fp) break;
+        if (next_fp <= fp) break;  // Stack grows down, FP should increase
+        if ((unsigned long)next_fp - (unsigned long)fp > 0x100000) break;  // Max 1MB frame
+
+        fp = next_fp;
+    }
+
+    return depth;
+}
+
+// Print a fully analyzed stack trace
+static void print_analyzed_stack_trace(const char *reason) {
+    void *frames[MAX_STACK_FRAMES];
+    int depth;
+
+    // Collect stack frames
+    depth = collect_stack_frames(frames, MAX_STACK_FRAMES);
+
+    if (depth == 0) {
+        fprintf(stderr, "\n  [Stack trace unavailable - frame pointer walking failed]\n");
+        return;
+    }
+
+    fprintf(stderr, "\n┌─────────────────────────────────────────────────────────────────────┐\n");
+    fprintf(stderr, "│ STACK TRACE: %-55s │\n", reason ? reason : "Exception");
+    fprintf(stderr, "├─────────────────────────────────────────────────────────────────────┤\n");
+
+    // Load memory map for addr2line offset calculation
+    load_memory_map();
+
+    int frames_shown = 0;
+    for (int i = 0; i < depth && frames_shown < 15; i++) {
+        unsigned long addr = (unsigned long)frames[i];
+        char func_name[256] = {0};
+        char lib_name[256] = {0};
+        char lib_display[30] = {0};
+        int resolved = 0;
+
+        // PRIMARY: Use dladdr - works reliably with runtime linker
+        Dl_info info;
+        if (dladdr(frames[i], &info)) {
+            // Get library name
+            if (info.dli_fname) {
+                strncpy(lib_name, get_basename(info.dli_fname), sizeof(lib_name) - 1);
+            }
+
+            // Get symbol name (try to demangle)
+            if (info.dli_sname) {
+                if (cxa_demangle_fn) {
+                    int status = 0;
+                    char *demangled = cxa_demangle_fn(info.dli_sname, NULL, NULL, &status);
+                    if (demangled) {
+                        strncpy(func_name, demangled, sizeof(func_name) - 1);
+                        free(demangled);
+                    } else {
+                        strncpy(func_name, info.dli_sname, sizeof(func_name) - 1);
+                    }
+                } else {
+                    strncpy(func_name, info.dli_sname, sizeof(func_name) - 1);
+                }
+                resolved = 1;
+            }
+
+            // SECONDARY: Try addr2line for more detail if dladdr didn't give symbol
+            if (!resolved && info.dli_fname) {
+                // Calculate offset for addr2line
+                map_entry_t *entry = find_map_entry(addr);
+                if (entry) {
+                    unsigned long file_offset = entry->offset + (addr - entry->start);
+                    char file_loc[256];
+                    resolve_with_addr2line(entry->path, file_offset,
+                                          func_name, sizeof(func_name),
+                                          file_loc, sizeof(file_loc));
+                    if (func_name[0]) resolved = 1;
+                }
+            }
+        }
+
+        // If dladdr failed, try to find in memory map
+        if (!lib_name[0]) {
+            map_entry_t *entry = find_map_entry(addr);
+            if (entry) {
+                strncpy(lib_name, get_basename(entry->path), sizeof(lib_name) - 1);
+            } else {
+                strcpy(lib_name, "[unknown]");
+            }
+        }
+
+        // Truncate display names
+        snprintf(lib_display, sizeof(lib_display), "%.28s", lib_name);
+
+        // Truncate long function names
+        if (strlen(func_name) > 38) {
+            func_name[35] = '.';
+            func_name[36] = '.';
+            func_name[37] = '.';
+            func_name[38] = '\0';
+        }
+
+        if (func_name[0]) {
+            fprintf(stderr, "│ %2d: %-28s  %-38s │\n",
+                    frames_shown, lib_display, func_name);
+        } else {
+            // No symbol - show raw address
+            fprintf(stderr, "│ %2d: %-28s  [%p]%*s│\n",
+                    frames_shown, lib_display, frames[i], 20, "");
+        }
+
+        frames_shown++;
+    }
+
+    if (depth > 15) {
+        fprintf(stderr, "│     ... %d more frames ...%*s│\n", depth - 15, 37, "");
+    }
+
+    fprintf(stderr, "└─────────────────────────────────────────────────────────────────────┘\n");
+    fflush(stderr);
+}
+
+// Legacy function for backwards compatibility (redirects to new analyzer)
+static void print_stack_addresses(void) {
+    print_analyzed_stack_trace("Legacy call");
+}
+
+// ============================================================================
+// Exception Tracking (per-type counters for smart stack trace printing)
+// ============================================================================
+
+#define MAX_EXCEPTION_TYPES 32
+#define MAX_LOGGED_PER_TYPE 3
+#define MAX_LOGGED_TOTAL 50
+
+typedef struct {
+    const char *type_name;      // Mangled type name (pointer comparison ok)
+    int count;                  // Times this type was thrown
+    int logged_with_trace;      // Whether we've logged a full trace for this type
+} exception_type_tracker_t;
+
+static exception_type_tracker_t exception_types[MAX_EXCEPTION_TYPES];
+static int exception_type_count = 0;
+static volatile int total_exception_count = 0;
+static pthread_mutex_t exception_tracker_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// Find or create tracker for an exception type
+static exception_type_tracker_t* get_exception_tracker(const char *type_name) {
+    pthread_mutex_lock(&exception_tracker_mutex);
+
+    // Look for existing tracker
+    for (int i = 0; i < exception_type_count; i++) {
+        if (exception_types[i].type_name == type_name ||
+            (exception_types[i].type_name && type_name &&
+             strcmp(exception_types[i].type_name, type_name) == 0)) {
+            exception_types[i].count++;
+            pthread_mutex_unlock(&exception_tracker_mutex);
+            return &exception_types[i];
+        }
+    }
+
+    // Create new tracker if space available
+    if (exception_type_count < MAX_EXCEPTION_TYPES) {
+        exception_type_tracker_t *tracker = &exception_types[exception_type_count++];
+        tracker->type_name = type_name;
+        tracker->count = 1;
+        tracker->logged_with_trace = 0;
+        pthread_mutex_unlock(&exception_tracker_mutex);
+        return tracker;
+    }
+
+    pthread_mutex_unlock(&exception_tracker_mutex);
+    return NULL;  // No space for new types
+}
+
+// Our __cxa_throw interceptor - catches ALL C++ exceptions
+void __cxa_throw(void *thrown_exception, void *tinfo, void (*dest)(void*)) {
+    // Prevent recursion
+    if (in_exception_handler) {
+        if (orig_cxa_throw) {
+            orig_cxa_throw(thrown_exception, tinfo, dest);
+        }
+        abort();  // Should never reach here
+    }
+    in_exception_handler = 1;
+
+    int total_count = __sync_add_and_fetch(&total_exception_count, 1);
+
+    // Get exception type info
+    const char *type_name = get_type_name(tinfo);
+    exception_type_tracker_t *tracker = get_exception_tracker(type_name);
+
+    // Determine if we should log this exception
+    int should_log = (total_count <= MAX_LOGGED_TOTAL) &&
+                     (tracker == NULL || tracker->count <= MAX_LOGGED_PER_TYPE);
+    int should_trace = tracker && !tracker->logged_with_trace;
+
+    if (should_log) {
+        // Try to demangle the type name
+        char *demangled = NULL;
+        if (!cxa_demangle_fn) {
+            cxa_demangle_fn = (char* (*)(const char*, char*, size_t*, int*))dlsym(RTLD_DEFAULT, "__cxa_demangle");
+        }
+        if (cxa_demangle_fn && type_name) {
+            int status = 0;
+            demangled = cxa_demangle_fn(type_name, NULL, NULL, &status);
+        }
+        const char *readable_name = demangled ? demangled : type_name;
+
+        // Capture context FIRST (before any calls that might fail)
+        const char *ctx_query = last_query_being_processed;
+        const char *ctx_column = last_column_being_accessed;
+        long ctx_value_calls = global_value_type_calls;
+        long ctx_column_calls = global_column_type_calls;
+
+        // Determine if this is shim-related (our code was in the call path)
+        int is_shim_related = (ctx_value_calls > 0 || ctx_column_calls > 0 || ctx_query != NULL);
+
+        // Build a concise summary
+        fprintf(stderr, "\n");
+        fprintf(stderr, "╔══════════════════════════════════════════════════════════════════════╗\n");
+        fprintf(stderr, "║ EXCEPTION: %-50s      #%-4d ║\n",
+                readable_name ? readable_name : "unknown",
+                tracker ? tracker->count : total_count);
+        fprintf(stderr, "╠══════════════════════════════════════════════════════════════════════╣\n");
+
+        if (is_shim_related) {
+            fprintf(stderr, "║ Source: SHIM-RELATED (column_type=%ld, value_type=%ld)%*s║\n",
+                    ctx_column_calls, ctx_value_calls, 16, "");
+            if (ctx_query) {
+                // Truncate long queries
+                char query_snippet[55];
+                snprintf(query_snippet, sizeof(query_snippet), "%.54s", ctx_query);
+                fprintf(stderr, "║ Query: %-64s ║\n", query_snippet);
+            }
+            if (ctx_column) {
+                fprintf(stderr, "║ Column: %-63s ║\n", ctx_column);
+            }
+        } else {
+            fprintf(stderr, "║ Source: NOT SHIM-RELATED (external C++ code)%*s║\n", 26, "");
+        }
+
+        // Print stack trace for first occurrence of each exception type
+        if (should_trace) {
+            tracker->logged_with_trace = 1;
+            fprintf(stderr, "╠══════════════════════════════════════════════════════════════════════╣\n");
+            print_analyzed_stack_trace(readable_name);
+        }
+
+        fprintf(stderr, "╚══════════════════════════════════════════════════════════════════════╝\n");
+        fflush(stderr);
+
+        // Also log to our log file (concise version)
+        LOG_ERROR("EXCEPTION #%d [%s]: %s | shim=%s | col_calls=%ld | query=%.60s",
+                  total_count,
+                  readable_name ? readable_name : "?",
+                  should_trace ? "FIRST_OF_TYPE" : "repeat",
+                  is_shim_related ? "YES" : "NO",
+                  ctx_column_calls,
+                  ctx_query ? ctx_query : "(none)");
+
+        if (demangled) free(demangled);
+
+    } else if (total_count == MAX_LOGGED_TOTAL + 1) {
+        fprintf(stderr, "\n╔══════════════════════════════════════════════════════════════════════╗\n");
+        fprintf(stderr, "║ [INFO] Exception logging throttled (>%d total). Check logs for stats. ║\n", MAX_LOGGED_TOTAL);
+        fprintf(stderr, "╚══════════════════════════════════════════════════════════════════════╝\n");
+        fflush(stderr);
+
+        // Log exception type summary
+        LOG_ERROR("=== EXCEPTION SUMMARY (throttling active) ===");
+        for (int i = 0; i < exception_type_count; i++) {
+            char *demangled = NULL;
+            if (cxa_demangle_fn && exception_types[i].type_name) {
+                int status = 0;
+                demangled = cxa_demangle_fn(exception_types[i].type_name, NULL, NULL, &status);
+            }
+            LOG_ERROR("  %s: %d occurrences",
+                      demangled ? demangled : exception_types[i].type_name,
+                      exception_types[i].count);
+            if (demangled) free(demangled);
+        }
+    }
+
+    in_exception_handler = 0;
+
+    // Call original __cxa_throw to continue exception handling
+    if (!orig_cxa_throw) {
+        orig_cxa_throw = (void (*)(void*, void*, void(*)(void*)))dlsym(RTLD_NEXT, "__cxa_throw");
+    }
+    if (orig_cxa_throw) {
+        orig_cxa_throw(thrown_exception, tinfo, dest);
+    }
+
+    // Should never reach here
+    abort();
+}
+
+// ============================================================================
 // Crash/Exit Handler for Debugging
 // ============================================================================
 static void print_backtrace(const char *reason) {
-#if HAS_BACKTRACE
-    void *callstack[128];
-    int frames = backtrace(callstack, 128);
-    char **symbols = backtrace_symbols(callstack, frames);
+    fprintf(stderr, "\n");
+    fprintf(stderr, "╔══════════════════════════════════════════════════════════════════════╗\n");
+    fprintf(stderr, "║ FATAL SIGNAL: %-57s ║\n", reason);
+    fprintf(stderr, "╚══════════════════════════════════════════════════════════════════════╝\n");
 
-    fprintf(stderr, "\n=== BACKTRACE (%s) ===\n", reason);
-    LOG_ERROR("=== BACKTRACE (%s) ===", reason);
+    // Use our robust stack trace analyzer
+    print_analyzed_stack_trace(reason);
 
-    for (int i = 0; i < frames; i++) {
-        fprintf(stderr, "  [%d] %s\n", i, symbols[i]);
-        LOG_ERROR("  [%d] %s", i, symbols[i]);
-    }
-    fprintf(stderr, "=== END BACKTRACE ===\n\n");
+    // Also log to file
+    LOG_ERROR("=== FATAL SIGNAL: %s ===", reason);
     fflush(stderr);
-
-    free(symbols);
-#else
-    fprintf(stderr, "\n=== CRASH (%s) - backtrace not available on musl ===\n", reason);
-    LOG_ERROR("=== CRASH (%s) - backtrace not available on musl ===", reason);
-    fflush(stderr);
-#endif
 }
 
 static void signal_handler(int sig) {
     const char *sig_name = "UNKNOWN";
+    const char *sig_desc = "";
     switch(sig) {
-        case SIGSEGV: sig_name = "SIGSEGV"; break;
-        case SIGBUS: sig_name = "SIGBUS"; break;
-        case SIGFPE: sig_name = "SIGFPE"; break;
-        case SIGILL: sig_name = "SIGILL"; break;
+        case SIGSEGV: sig_name = "SIGSEGV"; sig_desc = "Segmentation fault"; break;
+        case SIGBUS:  sig_name = "SIGBUS";  sig_desc = "Bus error"; break;
+        case SIGFPE:  sig_name = "SIGFPE";  sig_desc = "Floating point exception"; break;
+        case SIGILL:  sig_name = "SIGILL";  sig_desc = "Illegal instruction"; break;
     }
-    print_backtrace(sig_name);
+
+    char reason[64];
+    snprintf(reason, sizeof(reason), "%s (%s)", sig_name, sig_desc);
+    print_backtrace(reason);
 
     // Re-raise to get default behavior
     signal(sig, SIG_DFL);
@@ -132,6 +709,8 @@ char* (*orig_sqlite3_expanded_sql)(sqlite3_stmt*) = NULL;
 const char* (*orig_sqlite3_sql)(sqlite3_stmt*) = NULL;
 void (*orig_sqlite3_free)(void*) = NULL;
 const char* (*orig_sqlite3_bind_parameter_name)(sqlite3_stmt*, int) = NULL;
+int (*orig_sqlite3_bind_parameter_index)(sqlite3_stmt*, const char*) = NULL;
+const char* (*orig_sqlite3_column_decltype)(sqlite3_stmt*, int) = NULL;
 
 int (*orig_sqlite3_value_type)(sqlite3_value*) = NULL;
 const unsigned char* (*orig_sqlite3_value_text)(sqlite3_value*) = NULL;
@@ -379,81 +958,116 @@ int delegate_prepare_to_worker(sqlite3 *db, const char *zSql, int nByte,
 }
 
 // ============================================================================
-// Load Original SQLite Functions via dlsym(RTLD_NEXT)
+// Load Original SQLite Functions
 // ============================================================================
+// First try to load from explicit path (for when we REPLACE Plex's SQLite),
+// then fall back to RTLD_NEXT (for LD_PRELOAD mode)
+
+static void *real_sqlite_handle = NULL;
 
 static void load_original_functions(void) {
-    fprintf(stderr, "[SHIM_INIT] Loading original SQLite functions via RTLD_NEXT...\n");
+    // Try to load real SQLite from explicit path first
+    // This is needed when we replace Plex's libsqlite3.so with our shim
+    const char *sqlite_paths[] = {
+        "/usr/local/lib/plex-postgresql/libsqlite3_real.so",
+        "/usr/lib/plexmediaserver/lib/libsqlite3.so.original",
+        NULL
+    };
 
-    // Use RTLD_NEXT to get the real SQLite functions (next in load order)
-    orig_sqlite3_open = dlsym(RTLD_NEXT, "sqlite3_open");
-    orig_sqlite3_open_v2 = dlsym(RTLD_NEXT, "sqlite3_open_v2");
-    orig_sqlite3_close = dlsym(RTLD_NEXT, "sqlite3_close");
-    orig_sqlite3_close_v2 = dlsym(RTLD_NEXT, "sqlite3_close_v2");
-    orig_sqlite3_exec = dlsym(RTLD_NEXT, "sqlite3_exec");
-    orig_sqlite3_changes = dlsym(RTLD_NEXT, "sqlite3_changes");
-    orig_sqlite3_changes64 = dlsym(RTLD_NEXT, "sqlite3_changes64");
-    orig_sqlite3_last_insert_rowid = dlsym(RTLD_NEXT, "sqlite3_last_insert_rowid");
-    orig_sqlite3_get_table = dlsym(RTLD_NEXT, "sqlite3_get_table");
+    void *handle = NULL;
+    for (int i = 0; sqlite_paths[i] != NULL; i++) {
+        handle = dlopen(sqlite_paths[i], RTLD_NOW | RTLD_LOCAL);
+        if (handle) {
+            fprintf(stderr, "[SHIM_INIT] Loaded real SQLite from %s\n", sqlite_paths[i]);
+            real_sqlite_handle = handle;
+            break;
+        }
+    }
 
-    orig_sqlite3_errmsg = dlsym(RTLD_NEXT, "sqlite3_errmsg");
-    orig_sqlite3_errcode = dlsym(RTLD_NEXT, "sqlite3_errcode");
-    orig_sqlite3_extended_errcode = dlsym(RTLD_NEXT, "sqlite3_extended_errcode");
+    if (handle) {
+        // Load from explicit library
+        fprintf(stderr, "[SHIM_INIT] Loading original SQLite functions from explicit library...\n");
+        orig_sqlite3_open = dlsym(handle, "sqlite3_open");
+    } else {
+        // Fall back to RTLD_NEXT (LD_PRELOAD mode)
+        fprintf(stderr, "[SHIM_INIT] Loading original SQLite functions via RTLD_NEXT...\n");
+        handle = RTLD_NEXT;
+        orig_sqlite3_open = dlsym(handle, "sqlite3_open");
+    }
 
-    orig_sqlite3_prepare = dlsym(RTLD_NEXT, "sqlite3_prepare");
-    orig_sqlite3_prepare_v2 = dlsym(RTLD_NEXT, "sqlite3_prepare_v2");
-    orig_sqlite3_prepare_v3 = dlsym(RTLD_NEXT, "sqlite3_prepare_v3");
-    orig_sqlite3_prepare16_v2 = dlsym(RTLD_NEXT, "sqlite3_prepare16_v2");
+    // Use the selected handle (either explicit or RTLD_NEXT) for remaining functions
+    #define LOAD_SYM(name) orig_##name = dlsym(handle, #name)
 
-    orig_sqlite3_bind_int = dlsym(RTLD_NEXT, "sqlite3_bind_int");
-    orig_sqlite3_bind_int64 = dlsym(RTLD_NEXT, "sqlite3_bind_int64");
-    orig_sqlite3_bind_double = dlsym(RTLD_NEXT, "sqlite3_bind_double");
-    orig_sqlite3_bind_text = dlsym(RTLD_NEXT, "sqlite3_bind_text");
-    orig_sqlite3_bind_text64 = dlsym(RTLD_NEXT, "sqlite3_bind_text64");
-    orig_sqlite3_bind_blob = dlsym(RTLD_NEXT, "sqlite3_bind_blob");
-    orig_sqlite3_bind_blob64 = dlsym(RTLD_NEXT, "sqlite3_bind_blob64");
-    orig_sqlite3_bind_value = dlsym(RTLD_NEXT, "sqlite3_bind_value");
-    orig_sqlite3_bind_null = dlsym(RTLD_NEXT, "sqlite3_bind_null");
+    orig_sqlite3_open = dlsym(handle, "sqlite3_open");
+    orig_sqlite3_open_v2 = dlsym(handle, "sqlite3_open_v2");
+    orig_sqlite3_close = dlsym(handle, "sqlite3_close");
+    orig_sqlite3_close_v2 = dlsym(handle, "sqlite3_close_v2");
+    orig_sqlite3_exec = dlsym(handle, "sqlite3_exec");
+    orig_sqlite3_changes = dlsym(handle, "sqlite3_changes");
+    orig_sqlite3_changes64 = dlsym(handle, "sqlite3_changes64");
+    orig_sqlite3_last_insert_rowid = dlsym(handle, "sqlite3_last_insert_rowid");
+    orig_sqlite3_get_table = dlsym(handle, "sqlite3_get_table");
 
-    orig_sqlite3_step = dlsym(RTLD_NEXT, "sqlite3_step");
-    orig_sqlite3_reset = dlsym(RTLD_NEXT, "sqlite3_reset");
-    orig_sqlite3_finalize = dlsym(RTLD_NEXT, "sqlite3_finalize");
-    orig_sqlite3_clear_bindings = dlsym(RTLD_NEXT, "sqlite3_clear_bindings");
+    orig_sqlite3_errmsg = dlsym(handle, "sqlite3_errmsg");
+    orig_sqlite3_errcode = dlsym(handle, "sqlite3_errcode");
+    orig_sqlite3_extended_errcode = dlsym(handle, "sqlite3_extended_errcode");
 
-    orig_sqlite3_column_count = dlsym(RTLD_NEXT, "sqlite3_column_count");
-    orig_sqlite3_column_type = dlsym(RTLD_NEXT, "sqlite3_column_type");
-    orig_sqlite3_column_int = dlsym(RTLD_NEXT, "sqlite3_column_int");
-    orig_sqlite3_column_int64 = dlsym(RTLD_NEXT, "sqlite3_column_int64");
-    orig_sqlite3_column_double = dlsym(RTLD_NEXT, "sqlite3_column_double");
-    orig_sqlite3_column_text = dlsym(RTLD_NEXT, "sqlite3_column_text");
-    orig_sqlite3_column_blob = dlsym(RTLD_NEXT, "sqlite3_column_blob");
-    orig_sqlite3_column_bytes = dlsym(RTLD_NEXT, "sqlite3_column_bytes");
-    orig_sqlite3_column_name = dlsym(RTLD_NEXT, "sqlite3_column_name");
-    orig_sqlite3_column_value = dlsym(RTLD_NEXT, "sqlite3_column_value");
-    orig_sqlite3_data_count = dlsym(RTLD_NEXT, "sqlite3_data_count");
-    orig_sqlite3_db_handle = dlsym(RTLD_NEXT, "sqlite3_db_handle");
-    orig_sqlite3_expanded_sql = dlsym(RTLD_NEXT, "sqlite3_expanded_sql");
-    orig_sqlite3_sql = dlsym(RTLD_NEXT, "sqlite3_sql");
-    orig_sqlite3_free = dlsym(RTLD_NEXT, "sqlite3_free");
-    orig_sqlite3_bind_parameter_name = dlsym(RTLD_NEXT, "sqlite3_bind_parameter_name");
+    orig_sqlite3_prepare = dlsym(handle, "sqlite3_prepare");
+    orig_sqlite3_prepare_v2 = dlsym(handle, "sqlite3_prepare_v2");
+    orig_sqlite3_prepare_v3 = dlsym(handle, "sqlite3_prepare_v3");
+    orig_sqlite3_prepare16_v2 = dlsym(handle, "sqlite3_prepare16_v2");
 
-    orig_sqlite3_value_type = dlsym(RTLD_NEXT, "sqlite3_value_type");
-    orig_sqlite3_value_text = dlsym(RTLD_NEXT, "sqlite3_value_text");
-    orig_sqlite3_value_int = dlsym(RTLD_NEXT, "sqlite3_value_int");
-    orig_sqlite3_value_int64 = dlsym(RTLD_NEXT, "sqlite3_value_int64");
-    orig_sqlite3_value_double = dlsym(RTLD_NEXT, "sqlite3_value_double");
-    orig_sqlite3_value_bytes = dlsym(RTLD_NEXT, "sqlite3_value_bytes");
-    orig_sqlite3_value_blob = dlsym(RTLD_NEXT, "sqlite3_value_blob");
+    orig_sqlite3_bind_int = dlsym(handle, "sqlite3_bind_int");
+    orig_sqlite3_bind_int64 = dlsym(handle, "sqlite3_bind_int64");
+    orig_sqlite3_bind_double = dlsym(handle, "sqlite3_bind_double");
+    orig_sqlite3_bind_text = dlsym(handle, "sqlite3_bind_text");
+    orig_sqlite3_bind_text64 = dlsym(handle, "sqlite3_bind_text64");
+    orig_sqlite3_bind_blob = dlsym(handle, "sqlite3_bind_blob");
+    orig_sqlite3_bind_blob64 = dlsym(handle, "sqlite3_bind_blob64");
+    orig_sqlite3_bind_value = dlsym(handle, "sqlite3_bind_value");
+    orig_sqlite3_bind_null = dlsym(handle, "sqlite3_bind_null");
 
-    orig_sqlite3_create_collation = dlsym(RTLD_NEXT, "sqlite3_create_collation");
-    orig_sqlite3_create_collation_v2 = dlsym(RTLD_NEXT, "sqlite3_create_collation_v2");
+    orig_sqlite3_step = dlsym(handle, "sqlite3_step");
+    orig_sqlite3_reset = dlsym(handle, "sqlite3_reset");
+    orig_sqlite3_finalize = dlsym(handle, "sqlite3_finalize");
+    orig_sqlite3_clear_bindings = dlsym(handle, "sqlite3_clear_bindings");
+
+    orig_sqlite3_column_count = dlsym(handle, "sqlite3_column_count");
+    orig_sqlite3_column_type = dlsym(handle, "sqlite3_column_type");
+    orig_sqlite3_column_int = dlsym(handle, "sqlite3_column_int");
+    orig_sqlite3_column_int64 = dlsym(handle, "sqlite3_column_int64");
+    orig_sqlite3_column_double = dlsym(handle, "sqlite3_column_double");
+    orig_sqlite3_column_text = dlsym(handle, "sqlite3_column_text");
+    orig_sqlite3_column_blob = dlsym(handle, "sqlite3_column_blob");
+    orig_sqlite3_column_bytes = dlsym(handle, "sqlite3_column_bytes");
+    orig_sqlite3_column_name = dlsym(handle, "sqlite3_column_name");
+    orig_sqlite3_column_value = dlsym(handle, "sqlite3_column_value");
+    orig_sqlite3_data_count = dlsym(handle, "sqlite3_data_count");
+    orig_sqlite3_db_handle = dlsym(handle, "sqlite3_db_handle");
+    orig_sqlite3_expanded_sql = dlsym(handle, "sqlite3_expanded_sql");
+    orig_sqlite3_sql = dlsym(handle, "sqlite3_sql");
+    orig_sqlite3_free = dlsym(handle, "sqlite3_free");
+    orig_sqlite3_bind_parameter_name = dlsym(handle, "sqlite3_bind_parameter_name");
+    orig_sqlite3_bind_parameter_index = dlsym(handle, "sqlite3_bind_parameter_index");
+    orig_sqlite3_column_decltype = dlsym(handle, "sqlite3_column_decltype");
+
+    orig_sqlite3_value_type = dlsym(handle, "sqlite3_value_type");
+    orig_sqlite3_value_text = dlsym(handle, "sqlite3_value_text");
+    orig_sqlite3_value_int = dlsym(handle, "sqlite3_value_int");
+    orig_sqlite3_value_int64 = dlsym(handle, "sqlite3_value_int64");
+    orig_sqlite3_value_double = dlsym(handle, "sqlite3_value_double");
+    orig_sqlite3_value_bytes = dlsym(handle, "sqlite3_value_bytes");
+    orig_sqlite3_value_blob = dlsym(handle, "sqlite3_value_blob");
+
+    orig_sqlite3_create_collation = dlsym(handle, "sqlite3_create_collation");
+    orig_sqlite3_create_collation_v2 = dlsym(handle, "sqlite3_create_collation_v2");
 
     // Additional SQLite API functions
-    orig_sqlite3_malloc = dlsym(RTLD_NEXT, "sqlite3_malloc");
-    orig_sqlite3_bind_parameter_count = dlsym(RTLD_NEXT, "sqlite3_bind_parameter_count");
-    orig_sqlite3_stmt_readonly = dlsym(RTLD_NEXT, "sqlite3_stmt_readonly");
-    orig_sqlite3_stmt_busy = dlsym(RTLD_NEXT, "sqlite3_stmt_busy");
-    orig_sqlite3_stmt_status = dlsym(RTLD_NEXT, "sqlite3_stmt_status");
+    orig_sqlite3_malloc = dlsym(handle, "sqlite3_malloc");
+    orig_sqlite3_bind_parameter_count = dlsym(handle, "sqlite3_bind_parameter_count");
+    orig_sqlite3_stmt_readonly = dlsym(handle, "sqlite3_stmt_readonly");
+    orig_sqlite3_stmt_busy = dlsym(handle, "sqlite3_stmt_busy");
+    orig_sqlite3_stmt_status = dlsym(handle, "sqlite3_stmt_status");
 
     // Set up aliases for backward compatibility
     real_sqlite3_prepare_v2 = orig_sqlite3_prepare_v2;
@@ -809,6 +1423,16 @@ int sqlite3_stmt_status(sqlite3_stmt *pStmt, int op, int resetFlg) {
 // sqlite3_bind_parameter_name - use my_ implementation for PG statement support
 const char* sqlite3_bind_parameter_name(sqlite3_stmt *pStmt, int idx) {
     return my_sqlite3_bind_parameter_name(pStmt, idx);
+}
+
+// sqlite3_bind_parameter_index - use my_ implementation for named parameter support
+int sqlite3_bind_parameter_index(sqlite3_stmt *pStmt, const char *zName) {
+    return my_sqlite3_bind_parameter_index(pStmt, zName);
+}
+
+// sqlite3_column_decltype - use my_ implementation for PG type mapping
+const char* sqlite3_column_decltype(sqlite3_stmt *pStmt, int idx) {
+    return my_sqlite3_column_decltype(pStmt, idx);
 }
 
 // Value access
