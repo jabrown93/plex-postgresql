@@ -1,27 +1,28 @@
-# Release Notes - v0.8.6
+# Release Notes - v0.8.7
 
 **Release Date:** January 11, 2026
 
-This release completes the thread-safety fix for "bind on busy prepared statement" race conditions.
+This release fixes a critical deadlock that caused std::exception crashes after v0.8.5/v0.8.6 thread-safety improvements.
 
 ## Highlights
 
-### Thread-Safety Fix for Reset/Clear Operations (Critical)
+### Recursive Mutex Fix (Critical)
 
-Completes the race condition fix from v0.8.5 by addressing `sqlite3_reset()` and `sqlite3_clear_bindings()`:
+Fixed deadlock when bind/reset operations internally trigger column functions:
 
-| Function | Before | After |
-|----------|--------|-------|
-| `sqlite3_reset()` | Mutex released BEFORE orig_sqlite3_reset() | Mutex held during entire call |
-| `sqlite3_clear_bindings()` | No mutex at all | Mutex held during entire call |
+| Before | After |
+|--------|-------|
+| Non-recursive mutex | Recursive mutex (`PTHREAD_MUTEX_RECURSIVE`) |
+| Thread blocks on own mutex | Thread can re-lock same mutex |
+| std::exception crashes | Stable operation |
 
-**Root Cause:** While v0.8.5 fixed bind functions, `my_sqlite3_reset()` still released the mutex before calling `orig_sqlite3_reset()`. This allowed Thread B to call bind functions while Thread A was still inside reset, causing SQLITE_MISUSE (error 21).
+**Root Cause:** The thread-safety fixes in v0.8.5/v0.8.6 held the statement mutex during `orig_sqlite3_bind_*()` and `orig_sqlite3_reset()` calls. When SQLite internally triggered our intercepted column functions (e.g., `sqlite3_column_type`), those functions tried to lock the same mutex, causing a deadlock.
 
-**Solution:** Hold mutex for the entire duration of original SQLite function calls in reset and clear_bindings.
+**Solution:** Use `PTHREAD_MUTEX_RECURSIVE` for the statement mutex, allowing the same thread to acquire the lock multiple times without deadlock.
 
 ## Files Changed
 
-- `src/db_interpose_step.c` - `my_sqlite3_reset()` and `my_sqlite3_clear_bindings()` fixed
+- `src/pg_statement.c` - Changed mutex initialization to use recursive mutex
 
 ## Upgrade Instructions
 

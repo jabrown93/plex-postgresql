@@ -349,7 +349,13 @@ pg_stmt_t* pg_stmt_create(pg_connection_t *conn, const char *sql, sqlite3_stmt *
     pg_stmt_t *stmt = calloc(1, sizeof(pg_stmt_t));
     if (!stmt) return NULL;
 
-    pthread_mutex_init(&stmt->mutex, NULL);
+    // CRITICAL FIX: Use recursive mutex to prevent deadlock when bind/reset
+    // operations internally trigger column functions on the same statement
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&stmt->mutex, &attr);
+    pthread_mutexattr_destroy(&attr);
     atomic_store(&stmt->ref_count, 1);  // CRITICAL FIX: Initialize ref count
     stmt->conn = conn;
     stmt->shadow_stmt = shadow_stmt;
