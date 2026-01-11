@@ -71,11 +71,20 @@ RUN mkdir -p /libs && \
 FROM linuxserver/plex:latest
 
 # Install PostgreSQL client for health checks, sqlite3 for schema fixes, gdb for debugging
+# Also install locales - required for boost::locale in Plex
 RUN apt-get update && apt-get install -y --no-install-recommends \
     postgresql-client \
     sqlite3 \
     gdb \
-    && rm -rf /var/lib/apt/lists/*
+    locales \
+    && rm -rf /var/lib/apt/lists/* \
+    && echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen \
+    && locale-gen en_US.UTF-8
+
+# Set locale environment variables for boost::locale compatibility
+ENV LANG=en_US.UTF-8
+ENV LC_ALL=en_US.UTF-8
+ENV LANGUAGE=en_US.UTF-8
 
 RUN mkdir -p /usr/local/lib/plex-postgresql
 

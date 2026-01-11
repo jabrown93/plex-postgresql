@@ -150,7 +150,23 @@ init_sqlite_schema() {
     init_single_sqlite_db "$db_dir/com.plexapp.plugins.library.blobs.db" "$schema_file"
 }
 
-# Modify s6 run script to inject LD_PRELOAD
+# Setup locale for boost::locale compatibility
+setup_locale() {
+    echo "Setting up locale for Plex/boost::locale..."
+    
+    # Ensure en_US.UTF-8 locale is generated
+    if ! locale -a 2>/dev/null | grep -q "en_US.utf8"; then
+        echo "Generating en_US.UTF-8 locale..."
+        locale-gen en_US.UTF-8 2>/dev/null || true
+    fi
+    
+    # Update system default locale
+    update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 2>/dev/null || true
+    
+    echo "Locale setup complete"
+}
+
+# Modify s6 run script to inject LD_PRELOAD and locale settings
 setup_plex_shim() {
     local shim_path="/usr/local/lib/plex-postgresql/db_interpose_pg.so"
     local s6_run="/etc/s6-overlay/s6-rc.d/svc-plex/run"
@@ -160,11 +176,17 @@ setup_plex_shim() {
         if ! grep -q "LD_PRELOAD=" "$s6_run"; then
             echo "Modifying s6 run script to inject PostgreSQL shim..."
 
-            # Insert LD_PRELOAD and LD_LIBRARY_PATH exports after the shebang line
+            # Insert LD_PRELOAD, LD_LIBRARY_PATH, and locale exports after the shebang line
+            # LC_ALL and CHARSET are required for boost::locale to work correctly
+            # CHARSET is used by glibc's nl_langinfo fallback
             sed -i '2i\
 # PostgreSQL shim injection\
 export LD_LIBRARY_PATH="/usr/local/lib/plex-postgresql:/usr/lib/plexmediaserver/lib:$LD_LIBRARY_PATH"\
-export LD_PRELOAD="/usr/local/lib/plex-postgresql/db_interpose_pg.so"' "$s6_run"
+export LD_PRELOAD="/usr/local/lib/plex-postgresql/db_interpose_pg.so"\
+# Locale settings for boost::locale (prevents invalid_charset_error)\
+export LANG="en_US.UTF-8"\
+export LC_ALL="en_US.UTF-8"\
+export CHARSET="UTF-8"' "$s6_run"
 
             echo "s6 run script modified for PostgreSQL shim"
             cat "$s6_run"
@@ -191,6 +213,7 @@ if [ -n "$PLEX_PG_HOST" ]; then
     fi
 
     init_sqlite_schema
+    setup_locale
     setup_plex_shim
 else
     echo "PLEX_PG_HOST not set, skipping PostgreSQL initialization"
