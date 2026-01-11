@@ -64,8 +64,21 @@ all: $(TARGET)
 $(TARGET): $(OBJECTS)
 	$(CC) $(SHARED_FLAGS) -o $@ $(OBJECTS) $(CFLAGS) $(LDFLAGS)
 
-# Explicit macOS build - use dynamic_lookup instead of linking sqlite3
-macos: $(OBJECTS)
+# Explicit macOS build - always clean first to avoid corrupt object files
+macos: clean
+	@for src in $(SQL_TR_OBJS:.o=.c); do \
+		obj=$$(echo $$src | sed 's/\.c$$/.o/'); \
+		$(CC) -c -fPIC -o $$obj $$src $(CFLAGS); \
+	done
+	@for src in $(PG_MODULES:.o=.c); do \
+		obj=$$(echo $$src | sed 's/\.c$$/.o/'); \
+		$(CC) -c -fPIC -o $$obj $$src $(CFLAGS); \
+	done
+	@for src in $(DB_INTERPOSE_SHARED:.o=.c) src/db_interpose_core.c; do \
+		obj=$$(echo $$src | sed 's/\.c$$/.o/'); \
+		$(CC) -c -fPIC -o $$obj $$src $(CFLAGS); \
+	done
+	$(CC) -c -O2 -Iinclude -o src/fishhook.o src/fishhook.c
 	clang -dynamiclib -undefined dynamic_lookup -o db_interpose_pg.dylib $(OBJECTS) \
 		-I/opt/homebrew/opt/postgresql@15/include -Iinclude -Isrc \
 		-L/opt/homebrew/opt/postgresql@15/lib -lpq

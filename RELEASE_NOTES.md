@@ -1,97 +1,55 @@
-# Release Notes - v0.8.1
+# Release Notes - v0.8.5
 
-**Release Date:** January 10, 2026
+**Release Date:** January 11, 2026
 
-This release fixes critical std::bad_cast exceptions and adds robust exception diagnostics for Linux.
+This release fixes critical thread-safety issues causing intermittent 500 errors.
 
 ## Highlights
 
-### std::bad_cast Fix (Critical)
-Fixed SOCI ORM type conversion failures that caused HTTP 500 errors in Plex:
+### Thread-Safety Fix for Bind Operations (Critical)
+
+Fixed "bind on busy prepared statement" race condition that caused sporadic 500 errors:
 
 | Before | After |
 |--------|-------|
-| `column_decltype()` returned NULL | Returns proper SQLite type strings |
-| SOCI threw `std::bad_cast` | Type conversion works correctly |
-| 500 errors on library requests | Requests succeed |
+| Mutex locked AFTER SQLite call | Mutex locked BEFORE SQLite call |
+| Thread B could bind while Thread A stepping | Full mutual exclusion |
+| Intermittent SQLITE_MISUSE (error 21) | No more race conditions |
 
-**Root Cause:** SOCI uses `column_decltype()` to determine how to convert column values. When it returned NULL, SOCI defaulted to "char" type internally, but `column_type()` returned SQLITE_INTEGER, causing a type mismatch.
+**Root Cause:** In `db_interpose_bind.c`, all 9 bind functions acquired the mutex AFTER calling the original SQLite function. This allowed Thread B to call `sqlite3_bind_*()` while Thread A was inside `sqlite3_step()`, causing SQLite to return SQLITE_MISUSE.
 
-**Solution:** Map PostgreSQL OIDs to SQLite-compatible type strings that match `column_type()`:
+**Solution:** Move mutex acquisition to BEFORE the SQLite call in all bind functions.
 
-| PostgreSQL Type | OID | SQLite decltype | column_type() |
-|-----------------|-----|-----------------|---------------|
-| bool, int2, int4, int8 | 16, 21, 23, 20 | `INTEGER` | SQLITE_INTEGER |
-| float4, float8, numeric | 700, 701, 1700 | `REAL` | SQLITE_FLOAT |
-| bytea | 17 | `BLOB` | SQLITE_BLOB |
-| text, varchar, etc. | * | `TEXT` | SQLITE_TEXT |
+### lastval() Graceful Fallback (Critical)
 
-### Robust Exception Handler (Linux)
-New C++ exception interceptor provides automatic diagnostics:
+Fixed 500 errors on playQueues when `last_insert_rowid()` called before any INSERT:
 
-```
-╔══════════════════════════════════════════════════════════════════════╗
-║ EXCEPTION: std::domain_error                                    #1   ║
-╠══════════════════════════════════════════════════════════════════════╣
-║ Source: NOT SHIM-RELATED (external C++ code)                         ║
-╠══════════════════════════════════════════════════════════════════════╣
-┌─────────────────────────────────────────────────────────────────────┐
-│ STACK TRACE: std::domain_error                                      │
-├─────────────────────────────────────────────────────────────────────┤
-│  0: db_interpose_pg.so            __cxa_throw                       │
-│  1: Plex Media Server             [0xffff98980b9c]                  │
-│  2: Plex Media Server             [0xffff98980ca4]                  │
-└─────────────────────────────────────────────────────────────────────┘
-```
+| Before | After |
+|--------|-------|
+| PostgreSQL error: "lastval not yet defined" | Returns 0 (like SQLite) |
+| Exception in transaction | Graceful fallback |
+| 500 Internal Server Error | playQueues works |
 
-**Features:**
-- Per-exception-type tracking (stack trace for first occurrence of each type)
-- Automatic source detection: "SHIM-RELATED" vs "external C++ code"
-- Library identification via `dladdr()` runtime linker
-- C++ symbol demangling
-- Throttling after 50 exceptions with type summary
+**Root Cause:** Plex calls `sqlite3_last_insert_rowid()` before doing an INSERT. The shim translated this to `SELECT lastval()` which fails in PostgreSQL if no sequence has been used yet.
 
-## Technical Details
+**Solution:** Catch the PostgreSQL error and return 0, matching SQLite's behavior.
 
-### musl libc Compatibility
-The Linux shim now works correctly with musl-based containers (Alpine, etc.):
+### Build Improvements
 
-- Replaced `sscanf` with manual parsing (musl lacks `__isoc23_sscanf`)
-- Exception context uses volatile globals instead of TLS
-- Stack frame collection supports ARM64 and x86_64
-- Build script: `build_shim_musl.sh`
+- `make macos` now automatically runs `make clean` first to prevent corrupt object files
+- Fixes "unknown file type" linker errors when switching branches
 
-### Files Changed
+## Files Changed
 
-| File | Changes |
-|------|---------|
-| `src/db_interpose_column.c` | PostgreSQL OID → SQLite type mapping in `column_decltype()` |
-| `src/db_interpose_core_linux.c` | Robust exception handler, stack trace analyzer |
-| `build_shim_musl.sh` | Build script for musl-based containers |
+- `src/db_interpose_bind.c` - All 9 bind functions fixed
+- `src/db_interpose_metadata.c` - lastval() graceful fallback
+- `Makefile` - Auto-clean for macOS builds
+- `README.md` - Added Known Limitations section
 
-## Upgrade Notes
+## Upgrade Instructions
 
-This release is backward compatible. No configuration changes required.
-
-**For musl-based containers (Alpine, etc.):**
 ```bash
-# Copy source to container and build
-docker cp src/ container:/tmp/shim_build/
-docker exec container bash /tmp/shim_build/build_shim_musl.sh
+git pull
+make macos
+# Restart Plex
 ```
-
-## Bug Fixes
-
-- Fixed `std::bad_cast` exceptions causing 500 errors
-- Fixed `__isoc23_sscanf` symbol not found on musl
-- Fixed TLS variables not capturing exception context on musl
-
-## Known Issues
-
-- `std::domain_error` exceptions from Python (`_Py_HashDouble`) are unrelated to the shim
-  - These are internal Plex/Python exceptions, not causing request failures
-  - The exception handler correctly identifies them as "NOT SHIM-RELATED"
-
-## Contributors
-
-- Claude Opus 4.5 (Anthropic)

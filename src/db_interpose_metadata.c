@@ -67,7 +67,8 @@ sqlite3_int64 my_sqlite3_last_insert_rowid(sqlite3 *db) {
         // CRITICAL FIX: Lock connection mutex to prevent concurrent libpq access
         pthread_mutex_lock(&pg_conn->mutex);
         PGresult *res = PQexec(pg_conn->conn, "SELECT lastval()");
-        if (PQresultStatus(res) == PGRES_TUPLES_OK && PQntuples(res) > 0) {
+        ExecStatusType status = PQresultStatus(res);
+        if (status == PGRES_TUPLES_OK && PQntuples(res) > 0) {
             sqlite3_int64 rowid = atoll(PQgetvalue(res, 0, 0) ?: "0");
             PQclear(res);
             pthread_mutex_unlock(&pg_conn->mutex);
@@ -77,8 +78,15 @@ sqlite3_int64 my_sqlite3_last_insert_rowid(sqlite3 *db) {
                 result = rowid;
             }
         } else {
+            // CRITICAL FIX: lastval() fails if no INSERT has been done yet in this session
+            // Return 0 (like SQLite does) instead of propagating the error
+            // This prevents 500 errors when Plex calls last_insert_rowid() before INSERT
+            if (status == PGRES_FATAL_ERROR) {
+                LOG_DEBUG("last_insert_rowid: lastval() not available yet (no INSERT), returning 0");
+            }
             PQclear(res);
             pthread_mutex_unlock(&pg_conn->mutex);
+            // result stays 0, which is correct SQLite behavior for "no insert yet"
         }
     }
     // For non-PostgreSQL databases, return 0 (safe default)

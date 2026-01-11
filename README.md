@@ -361,6 +361,18 @@ python3 scripts/benchmark_compare.py
 
 The stack protection test validates all protection layers by simulating low-stack conditions without running Plex.
 
+## Known Limitations
+
+### sqlite3_column_decltype Not Intercepted
+
+The shim currently does **not** intercept `sqlite3_column_decltype()` calls. This function is used by SOCI ORM (which Plex uses internally) to determine C++ type bindings for query results.
+
+**Why not?** The decltype interception has edge cases that return incorrect types. SOCI ORM uses decltype to determine C++ type bindings - when the returned type doesn't match the actual data, SOCI throws `std::bad_cast` exceptions causing 500 errors. By NOT intercepting decltype, the original SQLite function returns NULL, which makes SOCI fall back to `sqlite3_column_type()` (which we handle correctly).
+
+**Impact:** Some edge cases with complex type conversions may not work perfectly. In practice, Plex operates normally without this interception - the shim handles type mapping through `sqlite3_column_type()` instead.
+
+**Status:** Experimental support exists in the `develop` branch but is disabled in production (`main` branch) until all edge cases are resolved.
+
 ## Troubleshooting
 
 ```bash

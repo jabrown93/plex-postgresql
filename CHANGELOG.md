@@ -5,6 +5,21 @@ All notable changes to plex-postgresql will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.5] - 2026-01-11
+
+### Fixed
+- **Thread-safety race condition in bind operations** - "bind on busy prepared statement" errors
+  - Root cause: Mutex was acquired AFTER calling SQLite, not before
+  - Solution: Lock mutex BEFORE calling `orig_sqlite3_bind_*()` in all 9 bind functions
+  - Prevents concurrent access when Thread A is stepping while Thread B is binding
+
+- **lastval() error causing 500 on playQueues** - PostgreSQL error when no INSERT done yet
+  - Root cause: `sqlite3_last_insert_rowid()` called `SELECT lastval()` which fails if no INSERT
+  - Solution: Gracefully return 0 (like SQLite does) instead of propagating error
+
+### Changed
+- `make macos` now auto-cleans before building to prevent corrupt object files
+
 ## [0.8.1] - 2026-01-10
 
 ### Fixed

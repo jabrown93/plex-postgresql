@@ -107,66 +107,78 @@ char* bytes_to_pg_hex(const unsigned char *data, size_t len) {
 // ============================================================================
 
 int my_sqlite3_bind_int(sqlite3_stmt *pStmt, int idx, int val) {
+    pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
+
+    // CRITICAL FIX: Lock BEFORE calling SQLite to prevent "bind on busy statement"
+    if (pg_stmt) pthread_mutex_lock(&pg_stmt->mutex);
+
     int rc = orig_sqlite3_bind_int ? orig_sqlite3_bind_int(pStmt, idx, val) : SQLITE_ERROR;
 
-    pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
     if (pg_stmt && idx > 0 && idx <= MAX_PARAMS) {
-        pthread_mutex_lock(&pg_stmt->mutex);  // CRITICAL FIX: Protect bind operations
         int pg_idx = pg_map_param_index(pg_stmt, pStmt, idx);
         if (pg_idx >= 0 && pg_idx < MAX_PARAMS) {
             // Use pre-allocated buffer instead of strdup
             snprintf(pg_stmt->param_buffers[pg_idx], 32, "%d", val);
             pg_stmt->param_values[pg_idx] = pg_stmt->param_buffers[pg_idx];
         }
-        pthread_mutex_unlock(&pg_stmt->mutex);
     }
 
+    if (pg_stmt) pthread_mutex_unlock(&pg_stmt->mutex);
     return rc;
 }
 
 int my_sqlite3_bind_int64(sqlite3_stmt *pStmt, int idx, sqlite3_int64 val) {
+    pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
+
+    // CRITICAL FIX: Lock BEFORE calling SQLite to prevent "bind on busy statement"
+    if (pg_stmt) pthread_mutex_lock(&pg_stmt->mutex);
+
     int rc = orig_sqlite3_bind_int64 ? orig_sqlite3_bind_int64(pStmt, idx, val) : SQLITE_ERROR;
 
-    pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
     if (pg_stmt && idx > 0 && idx <= MAX_PARAMS) {
-        pthread_mutex_lock(&pg_stmt->mutex);  // CRITICAL FIX: Protect bind operations
         int pg_idx = pg_map_param_index(pg_stmt, pStmt, idx);
         if (pg_idx >= 0 && pg_idx < MAX_PARAMS) {
             // Use pre-allocated buffer instead of strdup
             snprintf(pg_stmt->param_buffers[pg_idx], 32, "%lld", val);
             pg_stmt->param_values[pg_idx] = pg_stmt->param_buffers[pg_idx];
         }
-        pthread_mutex_unlock(&pg_stmt->mutex);
     }
 
+    if (pg_stmt) pthread_mutex_unlock(&pg_stmt->mutex);
     return rc;
 }
 
 int my_sqlite3_bind_double(sqlite3_stmt *pStmt, int idx, double val) {
+    pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
+
+    // CRITICAL FIX: Lock BEFORE calling SQLite to prevent "bind on busy statement"
+    if (pg_stmt) pthread_mutex_lock(&pg_stmt->mutex);
+
     int rc = orig_sqlite3_bind_double ? orig_sqlite3_bind_double(pStmt, idx, val) : SQLITE_ERROR;
 
-    pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
     if (pg_stmt && idx > 0 && idx <= MAX_PARAMS) {
-        pthread_mutex_lock(&pg_stmt->mutex);  // CRITICAL FIX: Protect bind operations
         int pg_idx = pg_map_param_index(pg_stmt, pStmt, idx);
         if (pg_idx >= 0 && pg_idx < MAX_PARAMS) {
             // Use pre-allocated buffer instead of strdup
             snprintf(pg_stmt->param_buffers[pg_idx], 32, "%.17g", val);
             pg_stmt->param_values[pg_idx] = pg_stmt->param_buffers[pg_idx];
         }
-        pthread_mutex_unlock(&pg_stmt->mutex);
     }
 
+    if (pg_stmt) pthread_mutex_unlock(&pg_stmt->mutex);
     return rc;
 }
 
 int my_sqlite3_bind_text(sqlite3_stmt *pStmt, int idx, const char *val,
                          int nBytes, void (*destructor)(void*)) {
+    pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
+
+    // CRITICAL FIX: Lock BEFORE calling SQLite to prevent "bind on busy statement"
+    if (pg_stmt) pthread_mutex_lock(&pg_stmt->mutex);
+
     int rc = orig_sqlite3_bind_text ? orig_sqlite3_bind_text(pStmt, idx, val, nBytes, destructor) : SQLITE_ERROR;
 
-    pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
     if (pg_stmt && idx > 0 && idx <= MAX_PARAMS && val) {
-        pthread_mutex_lock(&pg_stmt->mutex);  // CRITICAL FIX: Protect bind operations
         int pg_idx = pg_map_param_index(pg_stmt, pStmt, idx);
 
         if (pg_idx >= 0 && pg_idx < MAX_PARAMS) {
@@ -193,19 +205,22 @@ int my_sqlite3_bind_text(sqlite3_stmt *pStmt, int idx, const char *val,
                 }
             }
         }
-        pthread_mutex_unlock(&pg_stmt->mutex);
     }
 
+    if (pg_stmt) pthread_mutex_unlock(&pg_stmt->mutex);
     return rc;
 }
 
 int my_sqlite3_bind_blob(sqlite3_stmt *pStmt, int idx, const void *val,
                          int nBytes, void (*destructor)(void*)) {
+    pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
+
+    // CRITICAL FIX: Lock BEFORE calling SQLite to prevent "bind on busy statement"
+    if (pg_stmt) pthread_mutex_lock(&pg_stmt->mutex);
+
     int rc = orig_sqlite3_bind_blob ? orig_sqlite3_bind_blob(pStmt, idx, val, nBytes, destructor) : SQLITE_ERROR;
 
-    pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
     if (pg_stmt && idx > 0 && idx <= MAX_PARAMS && val && nBytes > 0) {
-        pthread_mutex_lock(&pg_stmt->mutex);  // CRITICAL FIX: Protect bind operations
         int pg_idx = pg_map_param_index(pg_stmt, pStmt, idx);
         if (pg_idx >= 0 && pg_idx < MAX_PARAMS) {
             if (pg_stmt->param_values[pg_idx] && !is_preallocated_buffer(pg_stmt, pg_idx)) {
@@ -219,20 +234,23 @@ int my_sqlite3_bind_blob(sqlite3_stmt *pStmt, int idx, const void *val,
             pg_stmt->param_lengths[pg_idx] = 0;  // Use strlen for text mode
             pg_stmt->param_formats[pg_idx] = 0;  // text mode (hex string)
         }
-        pthread_mutex_unlock(&pg_stmt->mutex);
     }
 
+    if (pg_stmt) pthread_mutex_unlock(&pg_stmt->mutex);
     return rc;
 }
 
 // sqlite3_bind_blob64 - 64-bit version for large blobs
 int my_sqlite3_bind_blob64(sqlite3_stmt *pStmt, int idx, const void *val,
                            sqlite3_uint64 nBytes, void (*destructor)(void*)) {
+    pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
+
+    // CRITICAL FIX: Lock BEFORE calling SQLite to prevent "bind on busy statement"
+    if (pg_stmt) pthread_mutex_lock(&pg_stmt->mutex);
+
     int rc = orig_sqlite3_bind_blob64 ? orig_sqlite3_bind_blob64(pStmt, idx, val, nBytes, destructor) : SQLITE_ERROR;
 
-    pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
     if (pg_stmt && idx > 0 && idx <= MAX_PARAMS && val && nBytes > 0) {
-        pthread_mutex_lock(&pg_stmt->mutex);  // CRITICAL FIX: Protect bind operations
         int pg_idx = pg_map_param_index(pg_stmt, pStmt, idx);
         if (pg_idx >= 0 && pg_idx < MAX_PARAMS) {
             if (pg_stmt->param_values[pg_idx] && !is_preallocated_buffer(pg_stmt, pg_idx)) {
@@ -245,9 +263,9 @@ int my_sqlite3_bind_blob64(sqlite3_stmt *pStmt, int idx, const void *val,
             pg_stmt->param_lengths[pg_idx] = 0;  // Use strlen for text mode
             pg_stmt->param_formats[pg_idx] = 0;  // text mode (hex string)
         }
-        pthread_mutex_unlock(&pg_stmt->mutex);
     }
 
+    if (pg_stmt) pthread_mutex_unlock(&pg_stmt->mutex);
     return rc;
 }
 
@@ -255,11 +273,14 @@ int my_sqlite3_bind_blob64(sqlite3_stmt *pStmt, int idx, const void *val,
 int my_sqlite3_bind_text64(sqlite3_stmt *pStmt, int idx, const char *val,
                            sqlite3_uint64 nBytes, void (*destructor)(void*),
                            unsigned char encoding) {
+    pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
+
+    // CRITICAL FIX: Lock BEFORE calling SQLite to prevent "bind on busy statement"
+    if (pg_stmt) pthread_mutex_lock(&pg_stmt->mutex);
+
     int rc = orig_sqlite3_bind_text64 ? orig_sqlite3_bind_text64(pStmt, idx, val, nBytes, destructor, encoding) : SQLITE_ERROR;
 
-    pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
     if (pg_stmt && idx > 0 && idx <= MAX_PARAMS && val) {
-        pthread_mutex_lock(&pg_stmt->mutex);  // CRITICAL FIX: Protect bind operations
         int pg_idx = pg_map_param_index(pg_stmt, pStmt, idx);
         if (pg_idx >= 0 && pg_idx < MAX_PARAMS) {
             if (pg_stmt->param_values[pg_idx] && !is_preallocated_buffer(pg_stmt, pg_idx)) {
@@ -284,19 +305,22 @@ int my_sqlite3_bind_text64(sqlite3_stmt *pStmt, int idx, const char *val,
                 }
             }
         }
-        pthread_mutex_unlock(&pg_stmt->mutex);
     }
 
+    if (pg_stmt) pthread_mutex_unlock(&pg_stmt->mutex);
     return rc;
 }
 
 // sqlite3_bind_value - copies value from another sqlite3_value
 int my_sqlite3_bind_value(sqlite3_stmt *pStmt, int idx, const sqlite3_value *pValue) {
+    pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
+
+    // CRITICAL FIX: Lock BEFORE calling SQLite to prevent "bind on busy statement"
+    if (pg_stmt) pthread_mutex_lock(&pg_stmt->mutex);
+
     int rc = orig_sqlite3_bind_value ? orig_sqlite3_bind_value(pStmt, idx, pValue) : SQLITE_ERROR;
 
-    pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
     if (pg_stmt && idx > 0 && idx <= MAX_PARAMS && pValue) {
-        pthread_mutex_lock(&pg_stmt->mutex);  // CRITICAL FIX: Protect bind operations
         int pg_idx = pg_map_param_index(pg_stmt, pStmt, idx);
         if (pg_idx >= 0 && pg_idx < MAX_PARAMS) {
             // Get value type and extract appropriately
@@ -345,18 +369,21 @@ int my_sqlite3_bind_value(sqlite3_stmt *pStmt, int idx, const sqlite3_value *pVa
                     break;
             }
         }
-        pthread_mutex_unlock(&pg_stmt->mutex);
     }
 
+    if (pg_stmt) pthread_mutex_unlock(&pg_stmt->mutex);
     return rc;
 }
 
 int my_sqlite3_bind_null(sqlite3_stmt *pStmt, int idx) {
+    pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
+
+    // CRITICAL FIX: Lock BEFORE calling SQLite to prevent "bind on busy statement"
+    if (pg_stmt) pthread_mutex_lock(&pg_stmt->mutex);
+
     int rc = orig_sqlite3_bind_null ? orig_sqlite3_bind_null(pStmt, idx) : SQLITE_ERROR;
 
-    pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
     if (pg_stmt && idx > 0 && idx <= MAX_PARAMS) {
-        pthread_mutex_lock(&pg_stmt->mutex);  // CRITICAL FIX: Protect bind operations
         int pg_idx = pg_map_param_index(pg_stmt, pStmt, idx);
         if (pg_idx >= 0 && pg_idx < MAX_PARAMS) {
             if (pg_stmt->param_values[pg_idx] && !is_preallocated_buffer(pg_stmt, pg_idx)) {
@@ -364,8 +391,8 @@ int my_sqlite3_bind_null(sqlite3_stmt *pStmt, int idx) {
                 pg_stmt->param_values[pg_idx] = NULL;
             }
         }
-        pthread_mutex_unlock(&pg_stmt->mutex);
     }
 
+    if (pg_stmt) pthread_mutex_unlock(&pg_stmt->mutex);
     return rc;
 }
