@@ -186,6 +186,11 @@ void worker_cleanup(void);
 int delegate_prepare_to_worker(sqlite3 *db, const char *zSql, int nByte,
                                sqlite3_stmt **ppStmt, const char **pzTail);
 
+// Safety check: ensures shim is fully initialized and symbols are resolved.
+// Returns 1 if safe to proceed, 0 if not ready.
+// Call at start of critical interpose functions as defense-in-depth.
+int shim_ensure_ready(void);
+
 // ============================================================================
 // Helper Functions (shared across modules)
 // ============================================================================
@@ -303,6 +308,10 @@ EXPORT const char* my_sqlite3_column_name(sqlite3_stmt *pStmt, int idx);
 EXPORT const char* my_sqlite3_column_decltype(sqlite3_stmt *pStmt, int idx);
 EXPORT sqlite3_value* my_sqlite3_column_value(sqlite3_stmt *pStmt, int idx);
 EXPORT int my_sqlite3_data_count(sqlite3_stmt *pStmt);
+
+// Resolve source table names for bare column lookup in decltype
+// Call after query execution to enable proper type lookups for queries without AS aliases
+void resolve_column_tables(pg_stmt_t *pg_stmt, pg_connection_t *pg_conn);
 
 // ============================================================================
 // Value Functions (db_interpose_column.c)

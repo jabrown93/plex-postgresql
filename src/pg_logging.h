@@ -19,6 +19,10 @@ void pg_logging_init(void);
 // Cleanup logging
 void pg_logging_cleanup(void);
 
+// Reset logging after fork (called by atfork handler)
+// Reinitializes mutex and reopens log file for child process
+void pg_logging_reset_after_fork(void);
+
 // Core logging function (internal - use macros below)
 void pg_log_message_internal(int level, const char *fmt, ...);
 

@@ -246,6 +246,32 @@ void pg_logging_cleanup(void) {
     logging_initialized = 0;
 }
 
+// Reset logging after fork - reinitializes mutex to prevent deadlock
+// CRITICAL: After fork(), the child inherits mutex state from parent
+// If parent held the mutex, child's copy is permanently locked!
+void pg_logging_reset_after_fork(void) {
+    // Reinitialize the mutex (this is safe because we're in child after fork)
+    pthread_mutex_init(&log_mutex, NULL);
+    
+    // Reset pthread_once control to allow re-initialization
+    logging_init_once = (pthread_once_t)PTHREAD_ONCE_INIT;
+    logging_initialized = 0;
+    
+    // Reset throttling state
+    query_count = 0;
+    query_count_total = 0;
+    suppressed_count = 0;
+    window_start = 0;
+    last_summary = 0;
+    throttle_active = 0;
+    log_message_count = 0;
+    
+    // Close inherited file handle (parent owns it)
+    // Child will reopen its own log file
+    log_file = NULL;
+    log_file_path[0] = '\0';
+}
+
 // ============================================================================
 // Core Logging (minimized mutex hold time)
 // ============================================================================
@@ -299,9 +325,10 @@ void pg_log_message_internal(int level, const char *fmt, ...) {
     }
 
     // Brief mutex hold for atomic write
+    // NOTE: Removed fflush() to prevent deadlock with flockfile()
+    // The file is already unbuffered (setbuf NULL), so fflush is not needed
     pthread_mutex_lock(&log_mutex);
     fputs(buffer, log_file);
-    fflush(log_file);
     pthread_mutex_unlock(&log_mutex);
 
     free(buffer);

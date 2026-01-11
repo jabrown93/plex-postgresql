@@ -256,6 +256,11 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                                 new_stmt->num_rows = PQntuples(new_stmt->result);
                                 new_stmt->num_cols = PQnfields(new_stmt->result);
                                 new_stmt->current_row = 0;
+                                new_stmt->result_conn = cached_read_conn;
+
+                                // Resolve source table names for bare column lookup in decltype
+                                resolve_column_tables(new_stmt, cached_read_conn);
+
                                 // Verbose result logging disabled for performance
                                 sql_translation_free(&trans);
                                 if (expanded_sql) sqlite3_free(expanded_sql);
@@ -507,6 +512,9 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                     LOG_DEBUG("TUPLES_OK: rows=%d cols=%d", pg_stmt->num_rows, pg_stmt->num_cols);
                     pg_stmt->current_row = 0;
                     pg_stmt->result_conn = exec_conn;  // Track which connection owns this result
+
+                    // Resolve source table names for bare column lookup in decltype
+                    resolve_column_tables(pg_stmt, exec_conn);
 
                     // QUERY RESULT CACHE: Store result for potential reuse
                     // pg_query_cache_store(pg_stmt, pg_stmt->result);  // DISABLED

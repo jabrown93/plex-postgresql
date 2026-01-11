@@ -184,6 +184,123 @@ static const char* lookup_sqlite_decltype(pg_connection_t *pg_conn, const char *
 }
 
 // ============================================================================
+// Helper: Resolve source table names for result columns using PQftable
+// ============================================================================
+// For queries without AS aliases (e.g., SELECT tags.extra_data FROM tags),
+// PostgreSQL returns the column name without table prefix. This function
+// uses PQftable() to determine which table each column came from, enabling
+// proper decltype cache lookups.
+//
+// IMPORTANT: Must be called after query execution when result is available.
+// Must NOT be called while holding pg_stmt->mutex if it needs to query PG.
+
+void resolve_column_tables(pg_stmt_t *pg_stmt, pg_connection_t *pg_conn) {
+    if (!pg_stmt || !pg_stmt->result || pg_stmt->col_tables_resolved) {
+        return;
+    }
+
+    int num_cols = pg_stmt->num_cols;
+    if (num_cols <= 0 || num_cols > MAX_PARAMS) {
+        pg_stmt->col_tables_resolved = 1;
+        return;
+    }
+
+    // Collect unique table OIDs that need name resolution
+    Oid table_oids[MAX_PARAMS];
+    int num_unique_tables = 0;
+
+    for (int i = 0; i < num_cols; i++) {
+        Oid table_oid = PQftable(pg_stmt->result, i);
+        if (table_oid == InvalidOid) {
+            continue;  // Computed column, no source table
+        }
+
+        // Check if we already have this OID
+        int found = 0;
+        for (int j = 0; j < num_unique_tables; j++) {
+            if (table_oids[j] == table_oid) {
+                found = 1;
+                break;
+            }
+        }
+        if (!found && num_unique_tables < MAX_PARAMS) {
+            table_oids[num_unique_tables++] = table_oid;
+        }
+    }
+
+    if (num_unique_tables == 0) {
+        pg_stmt->col_tables_resolved = 1;
+        return;
+    }
+
+    // Build query to get table names for all OIDs in one round-trip
+    char query[4096];
+    int offset = snprintf(query, sizeof(query),
+        "SELECT oid, relname FROM pg_class WHERE oid IN (");
+
+    for (int i = 0; i < num_unique_tables; i++) {
+        if (i > 0) {
+            offset += snprintf(query + offset, sizeof(query) - offset, ",");
+        }
+        offset += snprintf(query + offset, sizeof(query) - offset, "%u", table_oids[i]);
+    }
+    snprintf(query + offset, sizeof(query) - offset, ")");
+
+    // Execute query to get table names (need connection)
+    if (!pg_conn || !pg_conn->conn) {
+        LOG_DEBUG("RESOLVE_TABLES: No connection available");
+        pg_stmt->col_tables_resolved = 1;
+        return;
+    }
+
+    pthread_mutex_lock(&pg_conn->mutex);
+    PGresult *res = PQexec(pg_conn->conn, query);
+    pthread_mutex_unlock(&pg_conn->mutex);
+
+    if (!res || PQresultStatus(res) != PGRES_TUPLES_OK) {
+        LOG_ERROR("RESOLVE_TABLES: Query failed: %s",
+                  res ? PQerrorMessage(pg_conn->conn) : "NULL result");
+        if (res) PQclear(res);
+        pg_stmt->col_tables_resolved = 1;
+        return;
+    }
+
+    // Build OID -> name map
+    int num_results = PQntuples(res);
+    Oid result_oids[MAX_PARAMS];
+    char result_names[MAX_PARAMS][64];
+
+    for (int i = 0; i < num_results && i < MAX_PARAMS; i++) {
+        result_oids[i] = (Oid)atol(PQgetvalue(res, i, 0));
+        strncpy(result_names[i], PQgetvalue(res, i, 1), 63);
+        result_names[i][63] = '\0';
+    }
+    PQclear(res);
+
+    // Now assign table names to each column
+    for (int i = 0; i < num_cols && i < MAX_PARAMS; i++) {
+        Oid table_oid = PQftable(pg_stmt->result, i);
+        if (table_oid == InvalidOid) {
+            continue;  // Computed column
+        }
+
+        // Find matching table name
+        for (int j = 0; j < num_results; j++) {
+            if (result_oids[j] == table_oid) {
+                pg_stmt->col_table_names[i] = strdup(result_names[j]);
+                LOG_DEBUG("RESOLVE_TABLES: col[%d] '%s' -> table '%s'",
+                          i, PQfname(pg_stmt->result, i), result_names[j]);
+                break;
+            }
+        }
+    }
+
+    pg_stmt->col_tables_resolved = 1;
+    LOG_INFO("RESOLVE_TABLES: Resolved %d columns from %d unique tables",
+             num_cols, num_unique_tables);
+}
+
+// ============================================================================
 // Helper: Decode PostgreSQL hex-encoded BYTEA to binary
 // ============================================================================
 
@@ -329,6 +446,11 @@ static int ensure_pg_result_for_metadata(pg_stmt_t *pg_stmt) {
         pg_stmt->num_cols = PQnfields(pg_stmt->result);
         pg_stmt->current_row = -1;  // Will be 0 after first step()
         pg_stmt->result_conn = exec_conn;
+
+        // Resolve source table names for bare column lookup in decltype
+        // This enables proper type lookups for queries without AS aliases
+        resolve_column_tables(pg_stmt, exec_conn);
+
         LOG_INFO("METADATA_EXEC: Success - %d cols, %d rows", pg_stmt->num_cols, pg_stmt->num_rows);
         return 1;
     } else {
@@ -462,6 +584,15 @@ int my_sqlite3_column_int(sqlite3_stmt *pStmt, int idx) {
                     if (val[0] == 't' && val[1] == '\0') result_val = 1;
                     else if (val[0] == 'f' && val[1] == '\0') result_val = 0;
                     else result_val = atoi(val);
+                    
+                    // TYPE_DEBUG: Enhanced logging for type-related columns (cached path)
+                    const char *col_name = (idx < MAX_PARAMS && cached->col_names) ? cached->col_names[idx] : NULL;
+                    if (col_name && strstr(col_name, "type") != NULL) {
+                        LOG_ERROR("TYPE_DEBUG_CACHED: col='%s' idx=%d row=%d raw_val='%s' result=%d sql=%.200s",
+                                  col_name, idx, row, val, result_val,
+                                  pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
+                    }
+                    
                     pthread_mutex_unlock(&pg_stmt->mutex);
                     return result_val;
                 }
@@ -487,12 +618,23 @@ int my_sqlite3_column_int(sqlite3_stmt *pStmt, int idx) {
         }
 
         int result_val = 0;
+        const char *val = NULL;
+        const char *col_name = PQfname(pg_stmt->result, idx);
+        
         if (!PQgetisnull(pg_stmt->result, row, idx)) {
-            const char *val = PQgetvalue(pg_stmt->result, row, idx);
+            val = PQgetvalue(pg_stmt->result, row, idx);
             if (val[0] == 't' && val[1] == '\0') result_val = 1;
             else if (val[0] == 'f' && val[1] == '\0') result_val = 0;
             else result_val = atoi(val);
         }
+        
+        // TYPE_DEBUG: Enhanced logging for type-related columns (non-cached path)
+        if (col_name && strstr(col_name, "type") != NULL) {
+            LOG_ERROR("TYPE_DEBUG: col='%s' idx=%d row=%d raw_val='%s' result=%d sql=%.200s",
+                      col_name, idx, row, val ? val : "(NULL)", result_val,
+                      pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
+        }
+        
         pthread_mutex_unlock(&pg_stmt->mutex);
         return result_val;
     }
@@ -516,6 +658,15 @@ sqlite3_int64 my_sqlite3_column_int64(sqlite3_stmt *pStmt, int idx) {
                     if (val[0] == 't' && val[1] == '\0') result_val = 1;
                     else if (val[0] == 'f' && val[1] == '\0') result_val = 0;
                     else result_val = atoll(val);
+                    
+                    // TYPE_DEBUG: Enhanced logging for type-related columns (cached path)
+                    const char *col_name = (idx < MAX_PARAMS && cached->col_names) ? cached->col_names[idx] : NULL;
+                    if (col_name && strstr(col_name, "type") != NULL) {
+                        LOG_ERROR("TYPE_DEBUG_INT64_CACHED: col='%s' idx=%d row=%d raw_val='%s' result=%lld sql=%.200s",
+                                  col_name, idx, row, val, (long long)result_val,
+                                  pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
+                    }
+                    
                     pthread_mutex_unlock(&pg_stmt->mutex);
                     return result_val;
                 }
@@ -546,6 +697,14 @@ sqlite3_int64 my_sqlite3_column_int64(sqlite3_stmt *pStmt, int idx) {
             if (val[0] == 't' && val[1] == '\0') result_val = 1;
             else if (val[0] == 'f' && val[1] == '\0') result_val = 0;
             else result_val = atoll(val);
+            
+            // TYPE_DEBUG: Enhanced logging for type-related columns (non-cached path)
+            const char *col_name = PQfname(pg_stmt->result, idx);
+            if (col_name && strstr(col_name, "type") != NULL) {
+                LOG_ERROR("TYPE_DEBUG_INT64: col='%s' idx=%d row=%d raw_val='%s' result=%lld sql=%.200s",
+                          col_name, idx, row, val ? val : "(NULL)", (long long)result_val,
+                          pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
+            }
         }
         pthread_mutex_unlock(&pg_stmt->mutex);
         return result_val;
@@ -679,6 +838,22 @@ const unsigned char* my_sqlite3_column_text(sqlite3_stmt *pStmt, int idx) {
                 column_text_buffers[buf][0] = '\0';
                 pthread_mutex_unlock(&pg_stmt->mutex);
                 return (const unsigned char*)column_text_buffers[buf];
+            }
+            
+            // TYPE_DEBUG: Enhanced logging for type-related columns (column_text non-cached path)
+            const char *col_name = PQfname(pg_stmt->result, idx);
+            Oid oid = PQftype(pg_stmt->result, idx);
+            
+            // CRITICAL WARNING: column_text called for INTEGER column - this suggests SOCI type mismatch
+            if (oid == 23 || oid == 20 || oid == 21) {  // int4, int8, int2
+                LOG_ERROR("COLUMN_TEXT_INTEGER_WARNING: col='%s' idx=%d row=%d oid=%u val='%.50s' - INTEGER column accessed as TEXT!",
+                          col_name ? col_name : "?", idx, row, oid, source_value);
+            }
+            
+            if (col_name && strstr(col_name, "type") != NULL) {
+                LOG_ERROR("TYPE_DEBUG_TEXT: col='%s' idx=%d row=%d val='%.50s' sql=%.200s",
+                          col_name, idx, row, source_value,
+                          pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
             }
         }
 
@@ -898,39 +1073,87 @@ const char* my_sqlite3_column_name(sqlite3_stmt *pStmt, int idx) {
 // SOCI's SQLite3 backend uses a hardcoded type map (statement.cpp) to convert column values.
 // When column_decltype returns NULL, SOCI defaults to "char" (db_string), but column_type
 // returns SQLITE_INTEGER for booleans, causing a type mismatch that triggers std::bad_cast.
-// Solution: Return a decltype string that matches column_type() output.
+// Solution: Return the original SQLite declared type from metadata cache, with OID fallback.
 // See: https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=984534
 const char* my_sqlite3_column_decltype(sqlite3_stmt *pStmt, int idx) {
     LOG_ERROR("DECLTYPE_ENTRY: stmt=%p idx=%d", (void*)pStmt, idx);
     pg_stmt_t *pg_stmt = pg_find_any_stmt(pStmt);
-    LOG_ERROR("DECLTYPE_FIND: pg_stmt=%p", (void*)pg_stmt);
     if (pg_stmt && pg_stmt->is_pg == 2) {
-        LOG_ERROR("DECLTYPE_PG: is_pg=2, entering PG path");
         pthread_mutex_lock(&pg_stmt->mutex);
-        
+
         // CRITICAL: If no result yet, execute query to get column metadata
         // SOCI calls column_decltype before step() to determine types
         if (!pg_stmt->result && !pg_stmt->cached_result && pg_stmt->pg_sql) {
-            LOG_ERROR("DECLTYPE_META: executing query for metadata");
             if (!ensure_pg_result_for_metadata(pg_stmt)) {
                 LOG_ERROR("COLUMN_DECLTYPE: failed to execute query for metadata, returning TEXT");
                 pthread_mutex_unlock(&pg_stmt->mutex);
                 return "TEXT";  // Safe fallback
             }
         }
-        
-        // Get the PostgreSQL OID for this column
+
+        // Validate we have result and index is in range
         if (!pg_stmt->result || idx < 0 || idx >= pg_stmt->num_cols) {
-            LOG_ERROR("DECLTYPE_NO_RESULT: result=%p idx=%d num_cols=%d, returning TEXT",
+            LOG_DEBUG("DECLTYPE_NO_RESULT: result=%p idx=%d num_cols=%d, returning TEXT",
                      (void*)pg_stmt->result, idx, pg_stmt->num_cols);
             pthread_mutex_unlock(&pg_stmt->mutex);
             return "TEXT";  // Safe default that matches SQLITE_TEXT
         }
-        
-        Oid oid = PQftype(pg_stmt->result, idx);
+
         const char *col_name = PQfname(pg_stmt->result, idx);
-        const char *decltype;
+        const char *cached_type = NULL;
         
+        // Debug logging for metadata_type specifically
+        int is_metadata_type = (col_name && strstr(col_name, "metadata_type") != NULL);
+        if (is_metadata_type) {
+            LOG_ERROR("DECLTYPE_DEBUG: START col='%s' idx=%d row=%d num_cols=%d",
+                     col_name, idx, pg_stmt->current_row, pg_stmt->num_cols);
+        }
+
+        // STEP 1: Try looking up using column name as-is (for aliased columns like "devices_id")
+        cached_type = lookup_sqlite_decltype(pg_stmt->conn, col_name);
+        
+        if (is_metadata_type) {
+            LOG_ERROR("DECLTYPE_DEBUG: STEP1 col='%s' cached_type='%s'",
+                     col_name, cached_type ? cached_type : "(null)");
+        }
+
+        // STEP 2: If not found and we have a resolved table name, try table_column format
+        if (!cached_type && idx < MAX_PARAMS && pg_stmt->col_table_names[idx]) {
+            // Column name is bare (e.g., "extra_data"), construct "table_column" key
+            char cache_key[DECLTYPE_MAX_KEY_LEN];
+            snprintf(cache_key, sizeof(cache_key), "%s_%s",
+                     pg_stmt->col_table_names[idx], col_name);
+            cached_type = lookup_sqlite_decltype(pg_stmt->conn, cache_key);
+            if (cached_type) {
+                LOG_INFO("DECLTYPE_RESOLVED: bare col '%s' -> table '%s' -> '%s'",
+                         col_name, pg_stmt->col_table_names[idx], cached_type);
+            }
+            if (is_metadata_type) {
+                LOG_ERROR("DECLTYPE_DEBUG: STEP2 table='%s' cache_key='%s' cached_type='%s'",
+                         pg_stmt->col_table_names[idx], cache_key, cached_type ? cached_type : "(null)");
+            }
+        } else if (is_metadata_type) {
+            LOG_ERROR("DECLTYPE_DEBUG: STEP2 SKIPPED (cached_type=%s idx=%d has_table=%d)",
+                     cached_type ? cached_type : "(null)", idx, 
+                     (idx < MAX_PARAMS && pg_stmt->col_table_names[idx]) ? 1 : 0);
+        }
+
+        // STEP 3: If found in cache, return the original SQLite declared type
+        if (cached_type) {
+            if (is_metadata_type) {
+                LOG_ERROR("DECLTYPE_DEBUG: RETURNING CACHED='%s' for col='%s' idx=%d",
+                         cached_type, col_name, idx);
+            }
+            LOG_DEBUG("DECLTYPE_CACHED: idx=%d col='%s' -> '%s'",
+                     idx, col_name ? col_name : "?", cached_type);
+            pthread_mutex_unlock(&pg_stmt->mutex);
+            return cached_type;
+        }
+
+        // STEP 4: Fallback to OID-based type mapping
+        Oid oid = PQftype(pg_stmt->result, idx);
+        const char *decltype;
+
         // Map PostgreSQL OID to SQLite-compatible decltype
         // Must match the type returned by column_type() and be in SOCI's type map
         switch (oid) {
@@ -948,13 +1171,17 @@ const char* my_sqlite3_column_decltype(sqlite3_stmt *pStmt, int idx) {
                 decltype = "TEXT";  // Maps to SQLITE_TEXT
                 break;
         }
-        
-        LOG_ERROR("COLUMN_DECLTYPE_FIX: idx=%d col='%s' OID=%u -> '%s'", 
+
+        if (is_metadata_type) {
+            LOG_ERROR("DECLTYPE_DEBUG: RETURNING OID-BASED='%s' for col='%s' idx=%d oid=%u",
+                     decltype, col_name, idx, (unsigned)oid);
+        }
+        LOG_DEBUG("DECLTYPE_OID: idx=%d col='%s' OID=%u -> '%s'",
                  idx, col_name ? col_name : "?", (unsigned)oid, decltype);
         pthread_mutex_unlock(&pg_stmt->mutex);
         return decltype;
     }
-    LOG_ERROR("DECLTYPE_FALLBACK: using orig (pg_stmt=%p is_pg=%d)", 
+    LOG_DEBUG("DECLTYPE_FALLBACK: using orig (pg_stmt=%p is_pg=%d)",
              (void*)pg_stmt, pg_stmt ? pg_stmt->is_pg : -1);
     const char *orig_type = orig_sqlite3_column_decltype ? orig_sqlite3_column_decltype(pStmt, idx) : NULL;
     LOG_DEBUG("COLUMN_DECLTYPE: orig returned '%s'", orig_type ? orig_type : "NULL");
@@ -1030,6 +1257,7 @@ static atomic_long value_text_calls = 0;
 static atomic_long value_int_calls = 0;
 
 // Intercept sqlite3_value_type to handle our fake values
+// CRITICAL: Must hold mutex while accessing pg_stmt->result to prevent race conditions
 int my_sqlite3_value_type(sqlite3_value *pVal) {
     global_value_type_calls++;  // Global counter for exception debugging
     if (!pVal) return SQLITE_NULL;  // CRITICAL FIX: NULL check to prevent crash
@@ -1041,6 +1269,9 @@ int my_sqlite3_value_type(sqlite3_value *pVal) {
         // Update context for exception debugging (TLS)
         last_query_being_processed = pg_stmt->pg_sql;
 
+        // CRITICAL FIX: Lock mutex before accessing result to prevent use-after-free
+        pthread_mutex_lock(&pg_stmt->mutex);
+        
         if (pg_stmt->result && fake->row_idx < pg_stmt->num_rows && fake->col_idx < pg_stmt->num_cols) {
             int is_null = PQgetisnull(pg_stmt->result, fake->row_idx, fake->col_idx);
             Oid oid = PQftype(pg_stmt->result, fake->col_idx);
@@ -1069,15 +1300,17 @@ int my_sqlite3_value_type(sqlite3_value *pVal) {
                 }
             }
 
-            // Log every 100th call and all non-text types to trace issues
-            if (call_num % 100 == 0 || result != SQLITE_TEXT) {
+            // Log every 1000th call to reduce overhead (was 100)
+            if (call_num % 1000 == 0) {
                 LOG_INFO("VALUE_TYPE[%ld]: col='%s' row=%d OID=%u is_null=%d -> %s sql=%.60s",
                         call_num, col_name ? col_name : "?", fake->row_idx,
                         (unsigned)oid, is_null, sqlite_type_name(result),
                         pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
             }
+            pthread_mutex_unlock(&pg_stmt->mutex);
             return result;
         }
+        pthread_mutex_unlock(&pg_stmt->mutex);
         LOG_INFO("VALUE_TYPE[%ld]: FAKE VALUE but no result (row=%d col=%d)",
                 call_num, fake->row_idx, fake->col_idx);
         return SQLITE_NULL;
@@ -1140,93 +1373,134 @@ const unsigned char* my_sqlite3_value_text(sqlite3_value *pVal) {
 }
 
 // Intercept sqlite3_value_int to handle our fake values
+// CRITICAL: Must hold mutex while accessing pg_stmt->result
 int my_sqlite3_value_int(sqlite3_value *pVal) {
     if (!pVal) return 0;  // CRITICAL FIX: NULL check
     pg_fake_value_t *fake = pg_check_fake_value(pVal);
     if (fake && fake->pg_stmt) {
         pg_stmt_t *pg_stmt = (pg_stmt_t*)fake->pg_stmt;
         long call_num = atomic_fetch_add(&value_int_calls, 1);
+        (void)call_num;  // Suppress unused warning
+        
+        pthread_mutex_lock(&pg_stmt->mutex);
         if (pg_stmt->result && fake->row_idx < pg_stmt->num_rows && fake->col_idx < pg_stmt->num_cols) {
             if (PQgetisnull(pg_stmt->result, fake->row_idx, fake->col_idx)) {
+                pthread_mutex_unlock(&pg_stmt->mutex);
                 return 0;
             }
             const char *val = PQgetvalue(pg_stmt->result, fake->row_idx, fake->col_idx);
-            if (!val) return 0;
+            if (!val) {
+                pthread_mutex_unlock(&pg_stmt->mutex);
+                return 0;
+            }
             int result;
             // Handle PostgreSQL boolean 't'/'f' format
             if (val[0] == 't' && val[1] == '\0') result = 1;
             else if (val[0] == 'f' && val[1] == '\0') result = 0;
             else result = atoi(val);
 
-            // Log every 100th call
-            if (call_num % 100 == 0) {
-                const char *col_name = PQfname(pg_stmt->result, fake->col_idx);
-                LOG_INFO("VALUE_INT[%ld]: col='%s' row=%d val='%s' -> %d",
-                        call_num, col_name ? col_name : "?", fake->row_idx, val, result);
+            // TYPE_DEBUG: Enhanced logging for type-related columns (value_int path)
+            const char *col_name = PQfname(pg_stmt->result, fake->col_idx);
+            if (col_name && strstr(col_name, "type") != NULL) {
+                LOG_ERROR("TYPE_DEBUG_VALUE_INT: col='%s' idx=%d row=%d raw_val='%s' result=%d sql=%.200s",
+                          col_name, fake->col_idx, fake->row_idx, val, result,
+                          pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
             }
+
+            pthread_mutex_unlock(&pg_stmt->mutex);
             return result;
         }
+        pthread_mutex_unlock(&pg_stmt->mutex);
         return 0;
     }
     return orig_sqlite3_value_int ? orig_sqlite3_value_int(pVal) : 0;
 }
 
 // Intercept sqlite3_value_int64 to handle our fake values
+// CRITICAL: Must hold mutex while accessing pg_stmt->result
 sqlite3_int64 my_sqlite3_value_int64(sqlite3_value *pVal) {
     if (!pVal) return 0;  // CRITICAL FIX: NULL check
     pg_fake_value_t *fake = pg_check_fake_value(pVal);
     if (fake && fake->pg_stmt) {
         pg_stmt_t *pg_stmt = (pg_stmt_t*)fake->pg_stmt;
+        
+        pthread_mutex_lock(&pg_stmt->mutex);
         if (pg_stmt->result && fake->row_idx < pg_stmt->num_rows && fake->col_idx < pg_stmt->num_cols) {
             if (PQgetisnull(pg_stmt->result, fake->row_idx, fake->col_idx)) {
+                pthread_mutex_unlock(&pg_stmt->mutex);
                 return 0;
             }
             const char *val = PQgetvalue(pg_stmt->result, fake->row_idx, fake->col_idx);
-            if (!val) return 0;
+            if (!val) {
+                pthread_mutex_unlock(&pg_stmt->mutex);
+                return 0;
+            }
+            sqlite3_int64 result;
             // Handle PostgreSQL boolean 't'/'f' format
-            if (val[0] == 't' && val[1] == '\0') return 1;
-            if (val[0] == 'f' && val[1] == '\0') return 0;
-            return atoll(val);
+            if (val[0] == 't' && val[1] == '\0') result = 1;
+            else if (val[0] == 'f' && val[1] == '\0') result = 0;
+            else result = atoll(val);
+            pthread_mutex_unlock(&pg_stmt->mutex);
+            return result;
         }
+        pthread_mutex_unlock(&pg_stmt->mutex);
         return 0;
     }
     return orig_sqlite3_value_int64 ? orig_sqlite3_value_int64(pVal) : 0;
 }
 
 // Intercept sqlite3_value_double to handle our fake values
+// CRITICAL: Must hold mutex while accessing pg_stmt->result
 double my_sqlite3_value_double(sqlite3_value *pVal) {
     if (!pVal) return 0.0;  // CRITICAL FIX: NULL check
     pg_fake_value_t *fake = pg_check_fake_value(pVal);
     if (fake && fake->pg_stmt) {
         pg_stmt_t *pg_stmt = (pg_stmt_t*)fake->pg_stmt;
+        
+        pthread_mutex_lock(&pg_stmt->mutex);
         if (pg_stmt->result && fake->row_idx < pg_stmt->num_rows && fake->col_idx < pg_stmt->num_cols) {
             if (PQgetisnull(pg_stmt->result, fake->row_idx, fake->col_idx)) {
+                pthread_mutex_unlock(&pg_stmt->mutex);
                 return 0.0;
             }
             const char *val = PQgetvalue(pg_stmt->result, fake->row_idx, fake->col_idx);
-            if (!val) return 0.0;
+            if (!val) {
+                pthread_mutex_unlock(&pg_stmt->mutex);
+                return 0.0;
+            }
+            double result;
             // Handle PostgreSQL boolean 't'/'f' format
-            if (val[0] == 't' && val[1] == '\0') return 1.0;
-            if (val[0] == 'f' && val[1] == '\0') return 0.0;
-            return atof(val);
+            if (val[0] == 't' && val[1] == '\0') result = 1.0;
+            else if (val[0] == 'f' && val[1] == '\0') result = 0.0;
+            else result = atof(val);
+            pthread_mutex_unlock(&pg_stmt->mutex);
+            return result;
         }
+        pthread_mutex_unlock(&pg_stmt->mutex);
         return 0.0;
     }
     return orig_sqlite3_value_double ? orig_sqlite3_value_double(pVal) : 0.0;
 }
 
 // Intercept sqlite3_value_bytes to handle our fake values
+// CRITICAL: Must hold mutex while accessing pg_stmt->result
 int my_sqlite3_value_bytes(sqlite3_value *pVal) {
     if (!pVal) return 0;  // CRITICAL FIX: NULL check
     pg_fake_value_t *fake = pg_check_fake_value(pVal);
     if (fake && fake->pg_stmt) {
         pg_stmt_t *pg_stmt = (pg_stmt_t*)fake->pg_stmt;
+        
+        pthread_mutex_lock(&pg_stmt->mutex);
         if (pg_stmt->result && fake->row_idx < pg_stmt->num_rows && fake->col_idx < pg_stmt->num_cols) {
             if (PQgetisnull(pg_stmt->result, fake->row_idx, fake->col_idx)) {
+                pthread_mutex_unlock(&pg_stmt->mutex);
                 return 0;
             }
-            return PQgetlength(pg_stmt->result, fake->row_idx, fake->col_idx);
+            int len = PQgetlength(pg_stmt->result, fake->row_idx, fake->col_idx);
+            pthread_mutex_unlock(&pg_stmt->mutex);
+            return len;
         }
+        pthread_mutex_unlock(&pg_stmt->mutex);
         return 0;
     }
     return orig_sqlite3_value_bytes ? orig_sqlite3_value_bytes(pVal) : 0;

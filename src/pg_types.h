@@ -186,6 +186,11 @@ typedef struct pg_stmt {
     void *cached_blob[MAX_PARAMS];   // Cached blob data per column
     int cached_blob_len[MAX_PARAMS]; // Length of cached blob per column
     int cached_row;                  // Row for which values are cached (-1 = none)
+
+    // Resolved table names for each column (for decltype lookup of bare columns)
+    // Populated at query execution time using PQftable/PQftablecol
+    char *col_table_names[MAX_PARAMS]; // Source table name for each column (NULL if unknown)
+    int col_tables_resolved;           // 1 if table names have been resolved
 } pg_stmt_t;
 
 // ============================================================================

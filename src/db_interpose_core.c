@@ -6,6 +6,7 @@
  * - Original SQLite function pointers (for fishhook rebinding)
  * - Worker thread implementation
  * - Constructor/destructor with fishhook initialization
+ * - C++ exception interception for debugging
  */
 
 #include "db_interpose.h"
@@ -15,35 +16,365 @@
 #include <signal.h>
 
 // ============================================================================
+// C++ Exception Interception (macOS via fishhook)
+// ============================================================================
+
+// Limits for exception logging to prevent log explosion
+#define MAX_EXCEPTION_TYPES 64
+#define MAX_LOGGED_PER_TYPE 3
+#define MAX_LOGGED_TOTAL 50
+
+// Original __cxa_throw function pointer - must use noreturn attribute to match ABI
+typedef void (*cxa_throw_fn)(void*, void*, void(*)(void*)) __attribute__((noreturn));
+static cxa_throw_fn orig_cxa_throw = NULL;
+
+// Thread-local recursion prevention
+static __thread int in_exception_handler = 0;
+
+// Exception type tracking
+typedef struct {
+    const char *type_name;
+    int count;
+    int logged_with_trace;
+} exception_type_tracker_t;
+
+static exception_type_tracker_t exception_types[MAX_EXCEPTION_TYPES];
+static int exception_type_count = 0;
+static volatile int total_exception_count = 0;
+static pthread_mutex_t exception_tracker_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// Thread-local counters for more accurate debugging (declared early for use in print_exception_info)
+static __thread long tls_value_type_calls = 0;
+static __thread long tls_column_type_calls = 0;
+static __thread const char *tls_last_query = NULL;
+
+// Demangle function pointer
+static char* (*cxa_demangle_fn)(const char*, char*, size_t*, int*) = NULL;
+
+// Get type name from type_info
+static const char* get_type_name(void *tinfo) {
+    if (!tinfo) return "unknown";
+    // type_info layout: vtable pointer, then const char* name
+    const char **name_ptr = (const char**)((char*)tinfo + sizeof(void*));
+    return *name_ptr;
+}
+
+// Find or create tracker for an exception type
+static exception_type_tracker_t* get_exception_tracker(const char *type_name) {
+    pthread_mutex_lock(&exception_tracker_mutex);
+    
+    for (int i = 0; i < exception_type_count; i++) {
+        if (exception_types[i].type_name == type_name ||
+            (exception_types[i].type_name && type_name &&
+             strcmp(exception_types[i].type_name, type_name) == 0)) {
+            exception_types[i].count++;
+            pthread_mutex_unlock(&exception_tracker_mutex);
+            return &exception_types[i];
+        }
+    }
+    
+    if (exception_type_count < MAX_EXCEPTION_TYPES) {
+        exception_type_tracker_t *tracker = &exception_types[exception_type_count++];
+        tracker->type_name = type_name;
+        tracker->count = 1;
+        tracker->logged_with_trace = 0;
+        pthread_mutex_unlock(&exception_tracker_mutex);
+        return tracker;
+    }
+    
+    pthread_mutex_unlock(&exception_tracker_mutex);
+    return NULL;
+}
+
+// ============================================================================
 // Crash/Exit Handler for Debugging
 // ============================================================================
-static void print_backtrace(const char *reason) {
-    void *callstack[128];
-    int frames = backtrace(callstack, 128);
+
+// Try to extract exception message from std::exception or derived types
+// Returns pointer to static buffer or NULL
+// SAFE version that avoids calling virtual functions that might cause issues
+static const char* try_get_exception_message(void *thrown_exception, void *tinfo) {
+    (void)tinfo;  // Unused for now
+    if (!thrown_exception) return NULL;
+    
+    // The safest approach is to not call what() at all during exception handling
+    // as it can cause issues with exception propagation.
+    // Instead, we just return NULL and let the exception type speak for itself.
+    
+    // NOTE: Previously tried to call vtable[2] for what(), but this was causing
+    // issues with exception handling in boost::asio threads.
+    
+    return NULL;
+}
+
+static void print_backtrace_demangled(const char *reason, int skip_frames) {
+    void *callstack[64];
+    int frames = backtrace(callstack, 64);
     char **symbols = backtrace_symbols(callstack, frames);
     
-    fprintf(stderr, "\n=== BACKTRACE (%s) ===\n", reason);
+    fprintf(stderr, "\n");
+    fprintf(stderr, "╔══════════════════════════════════════════════════════════════════════════════╗\n");
+    fprintf(stderr, "║ BACKTRACE: %-67s ║\n", reason);
+    fprintf(stderr, "╠══════════════════════════════════════════════════════════════════════════════╣\n");
     LOG_ERROR("=== BACKTRACE (%s) ===", reason);
     
-    for (int i = 0; i < frames; i++) {
-        fprintf(stderr, "  [%d] %s\n", i, symbols[i]);
-        LOG_ERROR("  [%d] %s", i, symbols[i]);
+    // Skip our own frames (print_backtrace, my_cxa_throw, etc.)
+    int start = skip_frames;
+    int printed = 0;
+    
+    for (int i = start; i < frames && printed < 25; i++) {
+        // Parse the symbol line to extract the mangled name
+        // Format: "index  library  address  symbol + offset"
+        char *symbol = symbols[i];
+        
+        // Find the mangled symbol name (starts after the address)
+        char *name_start = NULL;
+        char *plus_sign = strrchr(symbol, '+');
+        if (plus_sign) {
+            // Work backwards from + to find start of symbol name
+            char *p = plus_sign - 1;
+            while (p > symbol && *p == ' ') p--;
+            while (p > symbol && *p != ' ') p--;
+            if (*p == ' ') name_start = p + 1;
+        }
+        
+        char demangled_line[256] = {0};
+        if (name_start && cxa_demangle_fn) {
+            // Extract just the mangled name
+            size_t name_len = plus_sign - name_start - 1;
+            char mangled[256];
+            if (name_len < sizeof(mangled)) {
+                strncpy(mangled, name_start, name_len);
+                mangled[name_len] = '\0';
+                
+                int status = 0;
+                char *demangled = cxa_demangle_fn(mangled, NULL, NULL, &status);
+                if (demangled && status == 0) {
+                    // Truncate long names
+                    if (strlen(demangled) > 70) {
+                        demangled[67] = '.';
+                        demangled[68] = '.';
+                        demangled[69] = '.';
+                        demangled[70] = '\0';
+                    }
+                    snprintf(demangled_line, sizeof(demangled_line), "[%2d] %s", i - start, demangled);
+                    free(demangled);
+                }
+            }
+        }
+        
+        if (demangled_line[0] == '\0') {
+            // Fallback to raw symbol (truncated)
+            snprintf(demangled_line, sizeof(demangled_line), "[%2d] %.72s", i - start, symbol);
+        }
+        
+        fprintf(stderr, "║ %-78s ║\n", demangled_line);
+        LOG_ERROR("  %s", demangled_line);
+        printed++;
     }
-    fprintf(stderr, "=== END BACKTRACE ===\n\n");
+    
+    if (frames > start + 25) {
+        fprintf(stderr, "║ ... and %d more frames                                                         ║\n", frames - start - 25);
+    }
+    fprintf(stderr, "╚══════════════════════════════════════════════════════════════════════════════╝\n");
     fflush(stderr);
     
     free(symbols);
 }
 
+// Legacy function for compatibility
+static void print_backtrace(const char *reason) {
+    print_backtrace_demangled(reason, 0);
+}
+
+// Print exception with context - now takes thrown_exception to extract message
+static void print_exception_info_full(void *thrown_exception, void *tinfo, const char *type_name, int count) {
+    // Demangle type name
+    char *demangled = NULL;
+    if (!cxa_demangle_fn) {
+        cxa_demangle_fn = (char* (*)(const char*, char*, size_t*, int*))dlsym(RTLD_DEFAULT, "__cxa_demangle");
+    }
+    if (cxa_demangle_fn && type_name) {
+        int status = 0;
+        demangled = cxa_demangle_fn(type_name, NULL, NULL, &status);
+    }
+    const char *readable_name = demangled ? demangled : (type_name ? type_name : "unknown");
+    
+    // Try to get exception message
+    const char *exc_message = try_get_exception_message(thrown_exception, tinfo);
+    
+    // Get shim context
+    const char *ctx_query = last_query_being_processed;
+    const char *ctx_column = last_column_being_accessed;
+    long ctx_value_calls = global_value_type_calls;
+    long ctx_column_calls = global_column_type_calls;
+    int is_shim_related = (ctx_value_calls > 0 || ctx_column_calls > 0 || ctx_query != NULL);
+    
+    // Check if this specific thread has done any shim work
+    int tls_is_shim_related = (tls_column_type_calls > 0 || tls_value_type_calls > 0 || tls_last_query != NULL);
+    
+    pthread_t tid = pthread_self();
+    fprintf(stderr, "\n");
+    fprintf(stderr, "╔══════════════════════════════════════════════════════════════════════════════╗\n");
+    fprintf(stderr, "║ C++ EXCEPTION #%-4d                                                          ║\n", count);
+    fprintf(stderr, "╠══════════════════════════════════════════════════════════════════════════════╣\n");
+    fprintf(stderr, "║ Type: %-72s ║\n", readable_name);
+    fprintf(stderr, "║ PID: %-6d  Thread: 0x%-54llx ║\n", getpid(), (unsigned long long)tid);
+    
+    // Print exception message if available
+    if (exc_message && exc_message[0]) {
+        fprintf(stderr, "╠══════════════════════════════════════════════════════════════════════════════╣\n");
+        fprintf(stderr, "║ MESSAGE:                                                                     ║\n");
+        // Print message, handling long messages with word wrap
+        const char *p = exc_message;
+        while (*p) {
+            char line[76];
+            int len = 0;
+            while (*p && len < 74) {
+                if (*p == '\n') { p++; break; }
+                line[len++] = *p++;
+            }
+            line[len] = '\0';
+            fprintf(stderr, "║   %-75s ║\n", line);
+        }
+    }
+    
+    fprintf(stderr, "╠══════════════════════════════════════════════════════════════════════════════╣\n");
+    
+    if (is_shim_related) {
+        fprintf(stderr, "║ SHIM STATE:                                                                  ║\n");
+        fprintf(stderr, "║   Global: col_type=%ld, val_type=%ld                                         ║\n",
+                ctx_column_calls, ctx_value_calls);
+        fprintf(stderr, "║   Thread: col_type=%ld, val_type=%ld (this_thread_used_shim=%s)              ║\n",
+                tls_column_type_calls, tls_value_type_calls, tls_is_shim_related ? "YES" : "NO");
+        if (!tls_is_shim_related) {
+            fprintf(stderr, "║   NOTE: This thread has NOT made any SQLite calls through shim!            ║\n");
+        }
+        if (ctx_query && ctx_query[0]) {
+            fprintf(stderr, "║   Last Query (any thread): %.50s ║\n", ctx_query);
+        }
+        if (ctx_column && ctx_column[0]) {
+            fprintf(stderr, "║   Last Column: %-62s ║\n", ctx_column);
+        }
+    } else {
+        fprintf(stderr, "║ NOT SHIM-RELATED: No SQLite calls have been made through the shim           ║\n");
+    }
+    
+    // Log to file with full message
+    LOG_ERROR("EXCEPTION #%d [%s]: msg=%s shim=%s tls_shim=%s col=%ld val=%ld",
+              count, readable_name, 
+              exc_message ? exc_message : "(no message)",
+              is_shim_related ? "YES" : "NO",
+              tls_is_shim_related ? "YES" : "NO",
+              ctx_column_calls, ctx_value_calls);
+    
+    if (demangled) free(demangled);
+}
+
+// Our __cxa_throw interceptor - MUST be noreturn to match original ABI
+__attribute__((noreturn))
+static void my_cxa_throw(void *thrown_exception, void *tinfo, void (*dest)(void*)) {
+    // Prevent recursion
+    if (in_exception_handler) {
+        if (orig_cxa_throw) {
+            orig_cxa_throw(thrown_exception, tinfo, dest);
+        }
+        abort();
+    }
+    in_exception_handler = 1;
+    
+    int total_count = __sync_add_and_fetch(&total_exception_count, 1);
+    const char *type_name = get_type_name(tinfo);
+    exception_type_tracker_t *tracker = get_exception_tracker(type_name);
+    
+    // Determine if we should log this exception
+    // Always log DB::Exception and similar database-related exceptions
+    int is_db_exception = (type_name && (strstr(type_name, "DB") || strstr(type_name, "Exception") || 
+                           strstr(type_name, "exception") || strstr(type_name, "Error")));
+    
+    int should_log = is_db_exception || 
+                     ((total_count <= MAX_LOGGED_TOTAL) &&
+                      (tracker == NULL || tracker->count <= MAX_LOGGED_PER_TYPE));
+    int should_trace = is_db_exception || (tracker && !tracker->logged_with_trace);
+    
+    if (should_log) {
+        print_exception_info_full(thrown_exception, tinfo, type_name, total_count);
+        
+        if (should_trace) {
+            if (tracker) tracker->logged_with_trace = 1;
+            print_backtrace_demangled("Exception Stack Trace", 2);  // Skip my_cxa_throw frames
+        }
+        
+        fprintf(stderr, "╚══════════════════════════════════════════════════════════════════════════════╝\n");
+        fflush(stderr);
+    } else if (total_count == MAX_LOGGED_TOTAL + 1) {
+        fprintf(stderr, "\n╔══════════════════════════════════════════════════════════════════════════════╗\n");
+        fprintf(stderr, "║ [THROTTLE] Exception logging limited (>%d). Summary in log file.              ║\n", MAX_LOGGED_TOTAL);
+        fprintf(stderr, "╚══════════════════════════════════════════════════════════════════════════════╝\n");
+        
+        // Log summary
+        LOG_ERROR("=== EXCEPTION SUMMARY ===");
+        for (int i = 0; i < exception_type_count; i++) {
+            char *demangled = NULL;
+            if (cxa_demangle_fn && exception_types[i].type_name) {
+                int status = 0;
+                demangled = cxa_demangle_fn(exception_types[i].type_name, NULL, NULL, &status);
+            }
+            LOG_ERROR("  %s: %d occurrences",
+                      demangled ? demangled : exception_types[i].type_name,
+                      exception_types[i].count);
+            if (demangled) free(demangled);
+        }
+    }
+    
+    in_exception_handler = 0;
+    
+    // Call original - MUST call this for exception to propagate correctly
+    if (orig_cxa_throw) {
+        // Debug: log the call
+        fprintf(stderr, "[EXCEPTION] Calling orig_cxa_throw at %p\n", (void*)orig_cxa_throw);
+        fflush(stderr);
+        orig_cxa_throw(thrown_exception, tinfo, dest);
+    } else {
+        fprintf(stderr, "[EXCEPTION] FATAL: orig_cxa_throw is NULL! Cannot propagate exception.\n");
+        fflush(stderr);
+    }
+    
+    // Should never reach here - __cxa_throw is [[noreturn]]
+    fprintf(stderr, "[EXCEPTION] FATAL: orig_cxa_throw returned! This should never happen.\n");
+    fflush(stderr);
+    abort();
+}
+
 static void signal_handler(int sig) {
     const char *sig_name = "UNKNOWN";
+    const char *sig_desc = "Unknown signal";
     switch(sig) {
-        case SIGSEGV: sig_name = "SIGSEGV"; break;
-        case SIGABRT: sig_name = "SIGABRT"; break;
-        case SIGBUS: sig_name = "SIGBUS"; break;
-        case SIGFPE: sig_name = "SIGFPE"; break;
-        case SIGILL: sig_name = "SIGILL"; break;
+        case SIGSEGV: sig_name = "SIGSEGV"; sig_desc = "Segmentation fault"; break;
+        case SIGABRT: sig_name = "SIGABRT"; sig_desc = "Abort"; break;
+        case SIGBUS:  sig_name = "SIGBUS";  sig_desc = "Bus error"; break;
+        case SIGFPE:  sig_name = "SIGFPE";  sig_desc = "Floating point exception"; break;
+        case SIGILL:  sig_name = "SIGILL";  sig_desc = "Illegal instruction"; break;
     }
+    
+    // Get shim context
+    const char *ctx_query = last_query_being_processed;
+    const char *ctx_column = last_column_being_accessed;
+    
+    fprintf(stderr, "\n");
+    fprintf(stderr, "╔══════════════════════════════════════════════════════════════════════╗\n");
+    fprintf(stderr, "║ FATAL SIGNAL: %s (%s)                                       ║\n", sig_name, sig_desc);
+    fprintf(stderr, "╠══════════════════════════════════════════════════════════════════════╣\n");
+    if (ctx_query) {
+        char q[60];
+        snprintf(q, sizeof(q), "%.59s", ctx_query);
+        fprintf(stderr, "║ Last Query: %-59s ║\n", q);
+    }
+    if (ctx_column) {
+        fprintf(stderr, "║ Last Column: %-58s ║\n", ctx_column);
+    }
+    fprintf(stderr, "╚══════════════════════════════════════════════════════════════════════╝\n");
+    
     print_backtrace(sig_name);
     
     // Re-raise to get default behavior
@@ -51,7 +382,30 @@ static void signal_handler(int sig) {
     raise(sig);
 }
 
-// Note: exit_handler removed - was used for debugging crash, but now fixed
+// Exit handler - tracks clean (non-signal) exits
+static void exit_handler(void) {
+    const char *ctx_query = last_query_being_processed;
+    const char *ctx_column = last_column_being_accessed;
+    
+    fprintf(stderr, "\n");
+    fprintf(stderr, "╔══════════════════════════════════════════════════════════════════════╗\n");
+    fprintf(stderr, "║ EXIT_HANDLER: Process exiting normally (atexit)                      ║\n");
+    fprintf(stderr, "╠══════════════════════════════════════════════════════════════════════╣\n");
+    fprintf(stderr, "║ PID: %-66d ║\n", getpid());
+    fprintf(stderr, "║ value_type calls: %-53ld ║\n", global_value_type_calls);
+    fprintf(stderr, "║ column_type calls: %-52ld ║\n", global_column_type_calls);
+    if (ctx_query) {
+        char q[60];
+        snprintf(q, sizeof(q), "%.59s", ctx_query);
+        fprintf(stderr, "║ Last Query: %-59s ║\n", q);
+    }
+    if (ctx_column) {
+        fprintf(stderr, "║ Last Column: %-58s ║\n", ctx_column);
+    }
+    fprintf(stderr, "╚══════════════════════════════════════════════════════════════════════╝\n");
+    
+    print_backtrace("EXIT");
+}
 
 // ============================================================================
 // Global State Definitions (exported via db_interpose.h)
@@ -159,6 +513,17 @@ pthread_mutex_t fake_value_mutex = PTHREAD_MUTEX_INITIALIZER;
 // Initialization flag
 int shim_initialized = 0;
 
+// Global context tracking for exception debugging
+// VISIBLE needed so other modules can reference these symbols
+VISIBLE const char * volatile last_query_being_processed = NULL;
+VISIBLE const char * volatile last_column_being_accessed = NULL;
+
+// Global counters for debugging
+volatile long global_value_type_calls = 0;
+volatile long global_column_type_calls = 0;
+
+// Thread-local counters moved to top of file (before print_exception_info)
+
 // ============================================================================
 // Helper Functions
 // ============================================================================
@@ -231,6 +596,63 @@ void ensure_real_sqlite_loaded(void) {
         real_sqlite3_errmsg = dlsym(sqlite_handle, "sqlite3_errmsg");
         real_sqlite3_errcode = dlsym(sqlite_handle, "sqlite3_errcode");
     }
+}
+
+// ============================================================================
+// Symbol Resolution Safety Check
+// ============================================================================
+// 
+// Called at the start of critical interpose functions to ensure the shim
+// is fully initialized. This catches any race condition where an interposed
+// function is called before the constructor completes.
+//
+// Returns 1 if safe to proceed, 0 if symbols are not ready.
+// When returning 0, the caller should fall back to real SQLite if possible.
+
+static volatile int symbols_verified = 0;
+
+int shim_ensure_ready(void) {
+    // Fast path: already verified
+    if (symbols_verified) return 1;
+    
+    // Memory barrier to ensure we see latest values
+    __sync_synchronize();
+    
+    // Check if constructor has completed
+    if (!shim_initialized) {
+        // Constructor hasn't finished - this shouldn't happen with proper delays
+        // but could occur if delay is disabled or too short
+        fprintf(stderr, "[SHIM] WARNING: shim_ensure_ready called before shim_initialized!\n");
+        fflush(stderr);
+        return 0;
+    }
+    
+    // Verify critical function pointers
+    if (!orig_sqlite3_open || !orig_sqlite3_prepare_v2 || !orig_sqlite3_step) {
+        // Symbols not resolved yet - try to load via dlsym as emergency fallback
+        fprintf(stderr, "[SHIM] WARNING: Critical symbols NULL, attempting dlsym fallback...\n");
+        fflush(stderr);
+        
+        if (sqlite_handle) {
+            if (!orig_sqlite3_open) 
+                orig_sqlite3_open = dlsym(sqlite_handle, "sqlite3_open");
+            if (!orig_sqlite3_prepare_v2) 
+                orig_sqlite3_prepare_v2 = dlsym(sqlite_handle, "sqlite3_prepare_v2");
+            if (!orig_sqlite3_step) 
+                orig_sqlite3_step = dlsym(sqlite_handle, "sqlite3_step");
+        }
+        
+        // Check again
+        if (!orig_sqlite3_open || !orig_sqlite3_prepare_v2 || !orig_sqlite3_step) {
+            fprintf(stderr, "[SHIM] FATAL: Cannot resolve critical SQLite symbols!\n");
+            fflush(stderr);
+            return 0;
+        }
+    }
+    
+    // All checks passed - mark as verified
+    symbols_verified = 1;
+    return 1;
 }
 
 // ============================================================================
@@ -437,7 +859,8 @@ static void setup_fishhook_rebindings(void) {
         {"sqlite3_column_blob", my_sqlite3_column_blob, (void**)&orig_sqlite3_column_blob},
         {"sqlite3_column_bytes", my_sqlite3_column_bytes, (void**)&orig_sqlite3_column_bytes},
         {"sqlite3_column_name", my_sqlite3_column_name, (void**)&orig_sqlite3_column_name},
-        {"sqlite3_column_decltype", my_sqlite3_column_decltype, (void**)&orig_sqlite3_column_decltype},
+        // DISABLED: Let SOCI call original decltype which returns NULL, forcing fallback to column_type()
+        // {"sqlite3_column_decltype", my_sqlite3_column_decltype, (void**)&orig_sqlite3_column_decltype},
         {"sqlite3_column_value", my_sqlite3_column_value, (void**)&orig_sqlite3_column_value},
         {"sqlite3_data_count", my_sqlite3_data_count, (void**)&orig_sqlite3_data_count},
 
@@ -466,6 +889,9 @@ static void setup_fishhook_rebindings(void) {
         {"sqlite3_stmt_busy", my_sqlite3_stmt_busy, (void**)&orig_sqlite3_stmt_busy},
         {"sqlite3_stmt_status", my_sqlite3_stmt_status, (void**)&orig_sqlite3_stmt_status},
         {"sqlite3_bind_parameter_name", my_sqlite3_bind_parameter_name, (void**)&orig_sqlite3_bind_parameter_name},
+        
+        // C++ exception interception DISABLED - causes crash regardless of noreturn
+        // {"__cxa_throw", (void*)my_cxa_throw, (void**)&orig_cxa_throw},
     };
 
     int count = sizeof(rebindings) / sizeof(rebindings[0]);
@@ -473,6 +899,13 @@ static void setup_fishhook_rebindings(void) {
 
     if (result == 0) {
         fprintf(stderr, "[SHIM_INIT] fishhook rebind_symbols succeeded for %d functions\n", count);
+        
+        // Report exception interception status
+        if (orig_cxa_throw) {
+            fprintf(stderr, "[SHIM_INIT] C++ exception interception ENABLED (orig_cxa_throw = %p)\n", (void*)orig_cxa_throw);
+        } else {
+            fprintf(stderr, "[SHIM_INIT] WARNING: C++ exception interception NOT available\n");
+        }
 
         // Set up aliases for backward compatibility
         real_sqlite3_prepare_v2 = orig_sqlite3_prepare_v2;
@@ -517,14 +950,33 @@ static void atfork_child(void) {
     // initializes and creates connections in adjacent slots
 
     // Use fprintf since logging may not be initialized yet
-    fprintf(stderr, "[FORK_CHILD] Cleaning up inherited connection pool\n");
+    fprintf(stderr, "[FORK_CHILD] Cleaning up inherited connection pool (child PID %d)\n", getpid());
     fflush(stderr);
+
+    // Clear exception context - parent's pointers are not valid in child
+    last_query_being_processed = NULL;
+    last_column_being_accessed = NULL;
+    global_value_type_calls = 0;
+    global_column_type_calls = 0;
+    
+    // Reset exception tracking for child process
+    total_exception_count = 0;
+    exception_type_count = 0;
+    
+    // Reset symbol verification - child needs to re-verify
+    // (symbols may need re-resolution in child's address space)
+    symbols_verified = 0;
 
     // Call pg_client cleanup function to clear pool state
     extern void pg_pool_cleanup_after_fork(void);
     pg_pool_cleanup_after_fork();
+    
+    // Reset logging to prevent mutex deadlock
+    // After fork, the child inherits parent's mutex state which may be locked
+    extern void pg_logging_reset_after_fork(void);
+    pg_logging_reset_after_fork();
 
-    fprintf(stderr, "[FORK_CHILD] Pool cleared, child will create new connections\n");
+    fprintf(stderr, "[FORK_CHILD] Pool and logging reset, child will reinitialize\n");
     fflush(stderr);
 }
 
@@ -532,19 +984,42 @@ static void atfork_child(void) {
 // Constructor/Destructor
 // ============================================================================
 
+// Track if shim was initialized (separate from shim_initialized which tracks completion)
+static pid_t shim_init_pid = 0;
+
 __attribute__((constructor))
 static void shim_init(void) {
     // Write to stderr first to verify constructor runs
     fprintf(stderr, "[SHIM_INIT] Constructor starting...\n");
     fflush(stderr);
+    
+    // Detect if we're in a forked child process
+    // pthread_once doesn't reset after fork, so we need to detect this
+    pid_t current_pid = getpid();
+    if (shim_init_pid != 0 && shim_init_pid != current_pid) {
+        fprintf(stderr, "[SHIM_INIT] Detected fork (parent PID %d, our PID %d) - resetting state\n",
+                shim_init_pid, current_pid);
+        fflush(stderr);
+        // We're in a forked child - clear state and let initialization happen fresh
+        shim_initialized = 0;
+        // Reset the global context
+        last_query_being_processed = NULL;
+        last_column_being_accessed = NULL;
+        global_value_type_calls = 0;
+        global_column_type_calls = 0;
+        total_exception_count = 0;
+        exception_type_count = 0;
+    }
+    shim_init_pid = current_pid;
 
-    // Install signal handlers for crash debugging
+    // Install signal handlers for crash debugging (only in debug mode)
+    #ifdef DEBUG
     signal(SIGSEGV, signal_handler);
     signal(SIGABRT, signal_handler);
     signal(SIGBUS, signal_handler);
     signal(SIGFPE, signal_handler);
     signal(SIGILL, signal_handler);
-    // Note: atexit handler removed - was used for debugging
+    #endif
 
     // CRITICAL: Install fork handlers BEFORE any PostgreSQL connections are made
     // This ensures child processes don't inherit parent's active connections
@@ -679,6 +1154,66 @@ static void shim_init(void) {
     shim_initialized = 1;
 
     fprintf(stderr, "[SHIM_INIT] All modules initialized\n");
+    fflush(stderr);
+    
+    // ========================================================================
+    // TIMING FIX: dyld symbol resolution race condition
+    // ========================================================================
+    // 
+    // PROBLEM: When Plex forks child processes (Scanner, Transcoder, etc.),
+    // the child inherits our dylib via DYLD_INSERT_LIBRARIES. However, there's
+    // a race condition where the child's constructor runs before dyld has
+    // finished resolving all symbols (orig_sqlite3_* function pointers).
+    // This causes crashes ~80% of the time.
+    //
+    // EVIDENCE:
+    // - Adding 200ms delay: fixes crash 100%
+    // - DYLD_PRINT_BINDINGS=1 (slows dyld): fixes crash 100%
+    // - Running under lldb: process hangs (debugger delays prevent crash)
+    //
+    // SOLUTION: Default-on delay of 200ms to ensure dyld completes symbol
+    // resolution before we return from constructor. Can be tuned or disabled.
+    //
+    // Environment variables:
+    //   PLEX_PG_INIT_DELAY_MS=N  - Custom delay in milliseconds (overrides default)
+    //   PLEX_PG_NO_INIT_DELAY=1  - Disable delay entirely (for debugging)
+    // ========================================================================
+    
+    // Check if delay is explicitly disabled
+    const char *no_delay = getenv("PLEX_PG_NO_INIT_DELAY");
+    if (no_delay && (no_delay[0] == '1' || no_delay[0] == 'y' || no_delay[0] == 'Y')) {
+        fprintf(stderr, "[SHIM_INIT] Init delay DISABLED via PLEX_PG_NO_INIT_DELAY\n");
+        fflush(stderr);
+    } else {
+        // Default 200ms delay, can be overridden
+        const char *delay_str = getenv("PLEX_PG_INIT_DELAY_MS");
+        int delay_ms = delay_str ? atoi(delay_str) : 200;  // Default 200ms
+        
+        if (delay_ms > 0) {
+            fprintf(stderr, "[SHIM_INIT] Waiting %d ms for dyld symbol resolution (PID %d)...\n", 
+                    delay_ms, current_pid);
+            fflush(stderr);
+            
+            // Use memory barrier to ensure all writes are visible
+            __sync_synchronize();
+            
+            usleep(delay_ms * 1000);
+            
+            // Another barrier after delay
+            __sync_synchronize();
+            
+            // Verify critical function pointers are valid
+            if (!orig_sqlite3_open || !orig_sqlite3_prepare_v2 || !orig_sqlite3_step) {
+                fprintf(stderr, "[SHIM_INIT] WARNING: Critical function pointers still NULL after delay!\n");
+                fprintf(stderr, "[SHIM_INIT]   orig_sqlite3_open = %p\n", (void*)orig_sqlite3_open);
+                fprintf(stderr, "[SHIM_INIT]   orig_sqlite3_prepare_v2 = %p\n", (void*)orig_sqlite3_prepare_v2);
+                fprintf(stderr, "[SHIM_INIT]   orig_sqlite3_step = %p\n", (void*)orig_sqlite3_step);
+                fflush(stderr);
+            }
+        }
+    }
+    
+    fprintf(stderr, "[SHIM_INIT] Constructor complete (PID %d)\n", current_pid);
     fflush(stderr);
 }
 

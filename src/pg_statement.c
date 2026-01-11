@@ -483,6 +483,14 @@ void pg_stmt_free(pg_stmt_t *stmt) {
         }
     }
 
+    // Free resolved column table names
+    for (int i = 0; i < MAX_PARAMS; i++) {
+        if (stmt->col_table_names[i]) {
+            free(stmt->col_table_names[i]);
+            stmt->col_table_names[i] = NULL;
+        }
+    }
+
     LOG_DEBUG("pg_stmt_free: destroying mutex and freeing stmt=%p", (void*)stmt);
     pthread_mutex_destroy(&stmt->mutex);
     free(stmt);

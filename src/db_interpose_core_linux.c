@@ -814,6 +814,61 @@ void ensure_real_sqlite_loaded(void) {
 }
 
 // ============================================================================
+// Symbol Resolution Safety Check
+// ============================================================================
+// 
+// Called at the start of critical interpose functions to ensure the shim
+// is fully initialized. This catches any race condition where an interposed
+// function is called before the constructor completes.
+//
+// Returns 1 if safe to proceed, 0 if symbols are not ready.
+// When returning 0, the caller should fall back to real SQLite if possible.
+
+static volatile int symbols_verified = 0;
+
+int shim_ensure_ready(void) {
+    // Fast path: already verified
+    if (symbols_verified) return 1;
+    
+    // Memory barrier to ensure we see latest values
+    __sync_synchronize();
+    
+    // Check if constructor has completed
+    if (!shim_initialized) {
+        // Constructor hasn't finished - this shouldn't happen with proper delays
+        // but could occur if delay is disabled or too short
+        fprintf(stderr, "[SHIM] WARNING: shim_ensure_ready called before shim_initialized!\n");
+        fflush(stderr);
+        return 0;
+    }
+    
+    // Verify critical function pointers
+    if (!orig_sqlite3_open || !orig_sqlite3_prepare_v2 || !orig_sqlite3_step) {
+        // Symbols not resolved yet - try to load via dlsym as emergency fallback
+        fprintf(stderr, "[SHIM] WARNING: Critical symbols NULL, attempting RTLD_NEXT fallback...\n");
+        fflush(stderr);
+        
+        if (!orig_sqlite3_open) 
+            orig_sqlite3_open = dlsym(RTLD_NEXT, "sqlite3_open");
+        if (!orig_sqlite3_prepare_v2) 
+            orig_sqlite3_prepare_v2 = dlsym(RTLD_NEXT, "sqlite3_prepare_v2");
+        if (!orig_sqlite3_step) 
+            orig_sqlite3_step = dlsym(RTLD_NEXT, "sqlite3_step");
+        
+        // Check again
+        if (!orig_sqlite3_open || !orig_sqlite3_prepare_v2 || !orig_sqlite3_step) {
+            fprintf(stderr, "[SHIM] FATAL: Cannot resolve critical SQLite symbols!\n");
+            fflush(stderr);
+            return 0;
+        }
+    }
+    
+    // All checks passed - mark as verified
+    symbols_verified = 1;
+    return 1;
+}
+
+// ============================================================================
 // Worker Thread Implementation
 // ============================================================================
 
@@ -1111,14 +1166,21 @@ static void atfork_child(void) {
     // This prevents the crash where parent's query hangs while child creates connections
 
     // Use fprintf since logging may not be initialized yet
-    fprintf(stderr, "[FORK_CHILD] Cleaning up inherited connection pool\n");
+    fprintf(stderr, "[FORK_CHILD] Cleaning up inherited connection pool (child PID %d)\n", getpid());
     fflush(stderr);
+    
+    // Reset symbol verification - child needs to re-verify
+    symbols_verified = 0;
 
     // Call pg_client cleanup function to clear pool state
     extern void pg_pool_cleanup_after_fork(void);
     pg_pool_cleanup_after_fork();
+    
+    // Reset logging to prevent mutex deadlock
+    extern void pg_logging_reset_after_fork(void);
+    pg_logging_reset_after_fork();
 
-    fprintf(stderr, "[FORK_CHILD] Pool cleared, child will create new connections\n");
+    fprintf(stderr, "[FORK_CHILD] Pool and logging reset, child will reinitialize\n");
     fflush(stderr);
 }
 
@@ -1176,6 +1238,61 @@ static void shim_init(void) {
     shim_initialized = 1;
 
     fprintf(stderr, "[SHIM_INIT] All modules initialized (Linux)\n");
+    fflush(stderr);
+    
+    // ========================================================================
+    // TIMING FIX: Symbol resolution race condition
+    // ========================================================================
+    // 
+    // PROBLEM: When Plex forks child processes (Scanner, Transcoder, etc.),
+    // the child inherits our .so via LD_PRELOAD. There can be a race condition
+    // where the child starts executing before the dynamic linker finishes
+    // resolving all symbols.
+    //
+    // SOLUTION: Default-on delay to ensure linker completes symbol resolution
+    // before we return from constructor. Can be tuned or disabled.
+    //
+    // Environment variables:
+    //   PLEX_PG_INIT_DELAY_MS=N  - Custom delay in milliseconds (overrides default)
+    //   PLEX_PG_NO_INIT_DELAY=1  - Disable delay entirely (for debugging)
+    // ========================================================================
+    
+    // Check if delay is explicitly disabled
+    const char *no_delay = getenv("PLEX_PG_NO_INIT_DELAY");
+    if (no_delay && (no_delay[0] == '1' || no_delay[0] == 'y' || no_delay[0] == 'Y')) {
+        fprintf(stderr, "[SHIM_INIT] Init delay DISABLED via PLEX_PG_NO_INIT_DELAY\n");
+        fflush(stderr);
+    } else {
+        // Default 200ms delay, can be overridden
+        const char *delay_str = getenv("PLEX_PG_INIT_DELAY_MS");
+        int delay_ms = delay_str ? atoi(delay_str) : 200;  // Default 200ms
+        
+        if (delay_ms > 0) {
+            pid_t current_pid = getpid();
+            fprintf(stderr, "[SHIM_INIT] Waiting %d ms for symbol resolution (PID %d)...\n", 
+                    delay_ms, current_pid);
+            fflush(stderr);
+            
+            // Use memory barrier to ensure all writes are visible
+            __sync_synchronize();
+            
+            usleep(delay_ms * 1000);
+            
+            // Another barrier after delay
+            __sync_synchronize();
+            
+            // Verify critical function pointers are valid
+            if (!orig_sqlite3_open || !orig_sqlite3_prepare_v2 || !orig_sqlite3_step) {
+                fprintf(stderr, "[SHIM_INIT] WARNING: Critical function pointers still NULL after delay!\n");
+                fprintf(stderr, "[SHIM_INIT]   orig_sqlite3_open = %p\n", (void*)orig_sqlite3_open);
+                fprintf(stderr, "[SHIM_INIT]   orig_sqlite3_prepare_v2 = %p\n", (void*)orig_sqlite3_prepare_v2);
+                fprintf(stderr, "[SHIM_INIT]   orig_sqlite3_step = %p\n", (void*)orig_sqlite3_step);
+                fflush(stderr);
+            }
+        }
+    }
+    
+    fprintf(stderr, "[SHIM_INIT] Constructor complete (Linux, PID %d)\n", getpid());
     fflush(stderr);
 }
 
