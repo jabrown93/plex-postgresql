@@ -735,13 +735,19 @@ int my_sqlite3_reset(sqlite3_stmt *pStmt) {
         }
         pg_stmt_clear_result(pg_stmt);  // This also resets write_executed
         int is_pg_only = (pg_stmt->is_pg == 2);
-        pthread_mutex_unlock(&pg_stmt->mutex);
 
         // If this is a PostgreSQL-only statement (is_pg == 2), don't call real SQLite
         // as the statement handle is not a valid SQLite statement
         if (is_pg_only) {
+            pthread_mutex_unlock(&pg_stmt->mutex);
             return SQLITE_OK;
         }
+
+        // CRITICAL FIX: Call orig_sqlite3_reset WHILE HOLDING THE MUTEX
+        // to prevent "bind on busy prepared statement" race condition
+        int rc = orig_sqlite3_reset ? orig_sqlite3_reset(pStmt) : SQLITE_ERROR;
+        pthread_mutex_unlock(&pg_stmt->mutex);
+        return rc;
     }
 
     // Also clear cached statements - these use a separate registry
@@ -750,12 +756,17 @@ int my_sqlite3_reset(sqlite3_stmt *pStmt) {
         pthread_mutex_lock(&cached->mutex);
         pg_stmt_clear_result(cached);  // This also resets write_executed
         int is_pg_only = (cached->is_pg == 2);
-        pthread_mutex_unlock(&cached->mutex);
 
         // If this is a PostgreSQL-only statement, don't call real SQLite
         if (is_pg_only) {
+            pthread_mutex_unlock(&cached->mutex);
             return SQLITE_OK;
         }
+
+        // CRITICAL FIX: Call orig_sqlite3_reset WHILE HOLDING THE MUTEX
+        int rc = orig_sqlite3_reset ? orig_sqlite3_reset(pStmt) : SQLITE_ERROR;
+        pthread_mutex_unlock(&cached->mutex);
+        return rc;
     }
 
     return orig_sqlite3_reset ? orig_sqlite3_reset(pStmt) : SQLITE_ERROR;
@@ -810,12 +821,17 @@ int my_sqlite3_finalize(sqlite3_stmt *pStmt) {
 int my_sqlite3_clear_bindings(sqlite3_stmt *pStmt) {
     pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
     if (pg_stmt) {
+        // CRITICAL FIX: Lock mutex for entire operation to prevent race conditions
+        pthread_mutex_lock(&pg_stmt->mutex);
         for (int i = 0; i < MAX_PARAMS; i++) {
             if (pg_stmt->param_values[i] && !is_preallocated_buffer(pg_stmt, i)) {
                 free(pg_stmt->param_values[i]);
                 pg_stmt->param_values[i] = NULL;
             }
         }
+        int rc = orig_sqlite3_clear_bindings ? orig_sqlite3_clear_bindings(pStmt) : SQLITE_ERROR;
+        pthread_mutex_unlock(&pg_stmt->mutex);
+        return rc;
     }
     return orig_sqlite3_clear_bindings ? orig_sqlite3_clear_bindings(pStmt) : SQLITE_ERROR;
 }

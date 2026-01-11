@@ -5,6 +5,14 @@ All notable changes to plex-postgresql will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.6] - 2026-01-11
+
+### Fixed
+- **Thread-safety race condition in reset/clear_bindings** - Additional "bind on busy prepared statement" fix
+  - Root cause: `sqlite3_reset()` and `sqlite3_clear_bindings()` released mutex BEFORE calling original SQLite
+  - Solution: Hold mutex during entire `orig_sqlite3_reset()` and `orig_sqlite3_clear_bindings()` calls
+  - Completes thread-safety fix started in v0.8.5
+
 ## [0.8.5] - 2026-01-11
 
 ### Fixed
