@@ -1607,9 +1607,13 @@ int sqlite3_bind_parameter_index(sqlite3_stmt *pStmt, const char *zName) {
     return my_sqlite3_bind_parameter_index(pStmt, zName);
 }
 
-// sqlite3_column_decltype - use my_ implementation for PG type mapping
+// sqlite3_column_decltype - DISABLED: Let SOCI call original decltype which returns NULL,
+// forcing fallback to column_type(). This matches the macOS behavior.
 const char* sqlite3_column_decltype(sqlite3_stmt *pStmt, int idx) {
-    return my_sqlite3_column_decltype(pStmt, idx);
+    if (orig_sqlite3_column_decltype) {
+        return orig_sqlite3_column_decltype(pStmt, idx);
+    }
+    return NULL;
 }
 
 // Value access
