@@ -56,7 +56,7 @@ DB_INTERPOSE_OBJS = $(DB_INTERPOSE_CORE) $(DB_INTERPOSE_SHARED)
 OBJECTS = $(SQL_TR_OBJS) $(PG_MODULES) $(DB_INTERPOSE_OBJS) src/fishhook.o
 LINUX_OBJECTS = $(SQL_TR_OBJS) $(PG_MODULES) $(DB_INTERPOSE_SHARED) src/db_interpose_core_linux.o
 
-.PHONY: all clean install test macos linux run stop unit-test test-recursion test-crash test-params test-logging test-soci test-fork
+.PHONY: all clean install test macos linux run stop unit-test test-recursion test-crash test-params test-logging test-soci test-fork test-fts test-buffer test-reaper
 
 all: $(TARGET)
 
@@ -316,6 +316,16 @@ test-fork: $(TEST_BIN_DIR)/test_fork_safety
 	@./$(TEST_BIN_DIR)/test_fork_safety
 	@echo ""
 
+# Pool reaper unit tests (connection pool idle cleanup)
+$(TEST_BIN_DIR)/test_pool_reaper: $(TEST_DIR)/test_pool_reaper.c
+	@mkdir -p $(TEST_BIN_DIR)
+	$(CC) -o $@ $< -lpthread -Wall -Wextra
+
+test-reaper: $(TEST_BIN_DIR)/test_pool_reaper
+	@echo ""
+	@./$(TEST_BIN_DIR)/test_pool_reaper
+	@echo ""
+
 # Micro-benchmarks (shim component performance)
 $(TEST_BIN_DIR)/test_benchmark: $(TEST_DIR)/test_benchmark.c $(SQL_TR_OBJS) src/pg_logging.o
 	@mkdir -p $(TEST_BIN_DIR)
@@ -414,8 +424,28 @@ test-exception: $(TEST_BIN_DIR)/test_exception_handler
 	@./$(TEST_BIN_DIR)/test_exception_handler
 	@echo ""
 
+# FTS escaped quote handling tests
+$(TEST_BIN_DIR)/test_fts_quotes: $(TEST_DIR)/test_fts_quotes.c
+	@mkdir -p $(TEST_BIN_DIR)
+	$(CC) -o $@ $< -Wall -Wextra
+
+test-fts: $(TEST_BIN_DIR)/test_fts_quotes
+	@echo ""
+	@./$(TEST_BIN_DIR)/test_fts_quotes
+	@echo ""
+
+# Buffer pool unit tests (column_text buffer expansion)
+$(TEST_BIN_DIR)/test_buffer_pool: $(TEST_DIR)/test_buffer_pool.c
+	@mkdir -p $(TEST_BIN_DIR)
+	$(CC) -o $@ $< -lpthread -Wall -Wextra
+
+test-buffer: $(TEST_BIN_DIR)/test_buffer_pool
+	@echo ""
+	@./$(TEST_BIN_DIR)/test_buffer_pool
+	@echo ""
+
 # Run all unit tests
-unit-test: test-recursion test-crash test-sql test-types test-soci test-cache test-tls test-fork test-api test-expanded test-params test-logging test-exception
+unit-test: test-recursion test-crash test-sql test-types test-soci test-cache test-tls test-fork test-reaper test-buffer test-api test-expanded test-params test-logging test-exception test-fts
 	@echo "All unit tests complete."
 
 # ============================================================================
