@@ -1029,7 +1029,7 @@ static void shim_init(void) {
 
     pg_logging_init();
     LOG_INFO("=== Plex PostgreSQL Interpose Shim loaded ===");
-    LOG_ERROR("SHIM_CONSTRUCTOR: Initialization complete");
+    LOG_INFO("SHIM_CONSTRUCTOR: Initialization complete");
 
     // Also write to stderr after logging init
     fprintf(stderr, "[SHIM_INIT] Logging initialized\n");

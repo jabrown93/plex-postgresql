@@ -7,6 +7,48 @@
 #include "pg_logging.h"
 
 // ============================================================================
+// Helper: Find end of SQL quoted string (handles '' escapes)
+// ============================================================================
+
+static const char* find_sql_string_end(const char *start) {
+    const char *p = start;
+    while (*p) {
+        if (*p == '\'') {
+            // Check if next char is also a quote (escaped quote)
+            if (*(p + 1) == '\'') {
+                // Skip both quotes ('' = one literal quote in SQL)
+                p += 2;
+                continue;
+            }
+            // Single quote = end of string
+            return p;
+        }
+        p++;
+    }
+    return NULL;
+}
+
+// ============================================================================
+// Helper: Unescape SQL string (convert '' to ')
+// ============================================================================
+
+static void unescape_sql_string(char *str) {
+    char *read = str;
+    char *write = str;
+
+    while (*read) {
+        if (*read == '\'' && *(read + 1) == '\'') {
+            // Two quotes -> one quote
+            *write++ = '\'';
+            read += 2;
+        } else {
+            *write++ = *read++;
+        }
+    }
+    *write = '\0';
+}
+
+// ============================================================================
 // Fix GROUP BY strict mode - add missing columns
 // ============================================================================
 
@@ -446,8 +488,14 @@ static void convert_fts_term(const char *sqlite_term, char *pg_term, size_t pg_t
             continue;
         }
 
-        // Escape special tsquery characters
-        if (c == '\'' || c == '\\') {
+        // Skip single quotes - they're not valid in tsquery syntax
+        // (they were SQL string delimiters, already handled by unescape_sql_string)
+        if (c == '\'') {
+            continue;
+        }
+
+        // Escape backslash for tsquery
+        if (c == '\\') {
             pg_term[out_idx++] = '\\';
             pg_term[out_idx++] = c;
             continue;
@@ -544,7 +592,7 @@ char* translate_fts(const char *sql) {
                 if (*scan == '\'') {
                     // Start of term string
                     char *quote_start = scan + 1;
-                    char *quote_end = strchr(quote_start, '\'');
+                    const char *quote_end = find_sql_string_end(quote_start);
                     if (quote_end) {
                         // HEAP allocation to prevent stack overflow (Plex uses ~388KB of stack)
                         char *search_term = calloc(256, 1);
@@ -564,11 +612,15 @@ char* translate_fts(const char *sql) {
                         if (term_len > 254) term_len = 254;
                         strncpy(search_term, quote_start, term_len);
 
+                        // Unescape SQL quotes ('' -> ')
+                        unescape_sql_string(search_term);
+
                         convert_fts_term(search_term, pg_term, 512);
 
                         // Construct replacement: col_fts @@ to_tsquery(...)
+                        // Use E'...' syntax to allow backslash escapes in the tsquery string
                         snprintf(replacement, 1024,
-                            "%s @@ to_tsquery('simple', '%s')",
+                            "%s @@ to_tsquery('simple', E'%s')",
                             maps[i].replacement, pg_term);
 
                         // Replacment logic
@@ -1338,19 +1390,31 @@ char* fix_json_operator_on_text(const char *sql) {
                                 p = after + 7;
                                 continue;
                             } else if (strncmp(after, "<", 1) == 0) {
-                                // column ->> '$.key' < 'value'
+                                // column ->> '$.key' < 'value' OR column ->> '$.key' < ?
                                 // -> column LIKE '%"key":"0"%' (simplified for version checking)
                                 out += sprintf(out, " LIKE '%%\"%s\":\"0\"%%'", json_key);
                                 free(json_key);
-                                // Skip the < and the value
-                                const char *quote1 = strchr(after, '\'');
-                                if (quote1) {
-                                    const char *quote2 = strchr(quote1 + 1, '\'');
+
+                                // Skip the < operator
+                                const char *value_start = after + 1;
+                                while (*value_start && isspace(*value_start)) value_start++;
+
+                                // Check if it's a literal value ('...') or a parameter ($N)
+                                if (*value_start == '\'') {
+                                    // Literal value: skip to end of quoted string
+                                    const char *quote2 = strchr(value_start + 1, '\'');
                                     if (quote2) {
                                         p = quote2 + 1;
                                         continue;
                                     }
+                                } else if (*value_start == '$' && isdigit(value_start[1])) {
+                                    // Parameter placeholder: skip past $N
+                                    const char *param_end = value_start + 1;
+                                    while (*param_end && isdigit(*param_end)) param_end++;
+                                    p = param_end;
+                                    continue;
                                 }
+
                                 // Fallback: skip to after the JSON operator
                                 p = key_end + 1;
                                 continue;

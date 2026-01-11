@@ -56,7 +56,7 @@ DB_INTERPOSE_OBJS = $(DB_INTERPOSE_CORE) $(DB_INTERPOSE_SHARED)
 OBJECTS = $(SQL_TR_OBJS) $(PG_MODULES) $(DB_INTERPOSE_OBJS) src/fishhook.o
 LINUX_OBJECTS = $(SQL_TR_OBJS) $(PG_MODULES) $(DB_INTERPOSE_SHARED) src/db_interpose_core_linux.o
 
-.PHONY: all clean install test macos linux run stop unit-test test-recursion test-crash
+.PHONY: all clean install test macos linux run stop unit-test test-recursion test-crash test-params test-logging test-soci test-fork
 
 all: $(TARGET)
 
@@ -265,6 +265,26 @@ test-sql: $(TEST_BIN_DIR)/test_sql_translator
 	@./$(TEST_BIN_DIR)/test_sql_translator
 	@echo ""
 
+# Type normalization unit tests (standalone - tests decltype normalization)
+$(TEST_BIN_DIR)/test_type_normalization: $(TEST_DIR)/test_type_normalization.c
+	@mkdir -p $(TEST_BIN_DIR)
+	$(CC) -o $@ $< -Wall -Wextra
+
+test-types: $(TEST_BIN_DIR)/test_type_normalization
+	@echo ""
+	@./$(TEST_BIN_DIR)/test_type_normalization
+	@echo ""
+
+# SOCI type compatibility tests (std::bad_cast prevention)
+$(TEST_BIN_DIR)/test_decltype_soci_compat: $(TEST_DIR)/test_decltype_soci_compat.c
+	@mkdir -p $(TEST_BIN_DIR)
+	$(CC) -o $@ $< -Wall -Wextra
+
+test-soci: $(TEST_BIN_DIR)/test_decltype_soci_compat
+	@echo ""
+	@./$(TEST_BIN_DIR)/test_decltype_soci_compat
+	@echo ""
+
 # Query cache unit tests (standalone - tests cache logic without libpq)
 $(TEST_BIN_DIR)/test_query_cache: $(TEST_DIR)/test_query_cache.c
 	@mkdir -p $(TEST_BIN_DIR)
@@ -283,6 +303,17 @@ $(TEST_BIN_DIR)/test_tls_cache: $(TEST_DIR)/test_tls_cache.c
 test-tls: $(TEST_BIN_DIR)/test_tls_cache
 	@echo ""
 	@./$(TEST_BIN_DIR)/test_tls_cache
+	@echo ""
+
+# Fork safety unit tests (pthread_atfork handlers)
+# NOTE: These tests run WITHOUT the shim loaded - they test fork logic in isolation
+$(TEST_BIN_DIR)/test_fork_safety: $(TEST_DIR)/test_fork_safety.c
+	@mkdir -p $(TEST_BIN_DIR)
+	$(CC) -o $@ $< -lpthread -Wall -Wextra
+
+test-fork: $(TEST_BIN_DIR)/test_fork_safety
+	@echo ""
+	@./$(TEST_BIN_DIR)/test_fork_safety
 	@echo ""
 
 # Micro-benchmarks (shim component performance)
@@ -337,8 +368,54 @@ else
 endif
 	@echo ""
 
+# Bind parameter index tests (named parameter mapping)
+$(TEST_BIN_DIR)/test_bind_parameter_index: $(TEST_DIR)/test_bind_parameter_index.c
+	@mkdir -p $(TEST_BIN_DIR)
+	$(CC) -o $@ $< -lsqlite3 -Wall -Wextra
+
+test-params: $(TARGET) $(TEST_BIN_DIR)/test_bind_parameter_index
+	@echo ""
+ifeq ($(UNAME_S),Darwin)
+	@DYLD_INSERT_LIBRARIES=./$(TARGET) \
+		PLEX_PG_HOST=/tmp \
+		PLEX_PG_DATABASE=plex \
+		PLEX_PG_USER=plex \
+		./$(TEST_BIN_DIR)/test_bind_parameter_index
+else
+	@LD_PRELOAD=./$(TARGET) \
+		PLEX_PG_HOST=localhost \
+		PLEX_PG_DATABASE=plex \
+		PLEX_PG_USER=plex \
+		./$(TEST_BIN_DIR)/test_bind_parameter_index
+endif
+	@echo ""
+
+# Logging deadlock prevention tests
+$(TEST_BIN_DIR)/test_logging_deadlock: $(TEST_DIR)/test_logging_deadlock.c
+	@mkdir -p $(TEST_BIN_DIR)
+	$(CC) -o $@ $< -lpthread -Wall -Wextra
+
+test-logging: $(TEST_BIN_DIR)/test_logging_deadlock
+	@echo ""
+ifeq ($(UNAME_S),Darwin)
+	@perl -e 'alarm 10; exec @ARGV' ./$(TEST_BIN_DIR)/test_logging_deadlock || echo "DEADLOCK DETECTED"
+else
+	@timeout 10 ./$(TEST_BIN_DIR)/test_logging_deadlock || echo "DEADLOCK DETECTED"
+endif
+	@echo ""
+
+# Exception handler unit tests (C++ exception interception logic)
+$(TEST_BIN_DIR)/test_exception_handler: $(TEST_DIR)/test_exception_handler.c
+	@mkdir -p $(TEST_BIN_DIR)
+	$(CC) -o $@ $< -lpthread -ldl -Wall -Wextra
+
+test-exception: $(TEST_BIN_DIR)/test_exception_handler
+	@echo ""
+	@./$(TEST_BIN_DIR)/test_exception_handler
+	@echo ""
+
 # Run all unit tests
-unit-test: test-recursion test-crash test-sql test-cache test-tls test-api test-expanded
+unit-test: test-recursion test-crash test-sql test-types test-soci test-cache test-tls test-fork test-api test-expanded test-params test-logging test-exception
 	@echo "All unit tests complete."
 
 # ============================================================================

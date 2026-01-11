@@ -480,12 +480,16 @@ static int is_library_db(const char *path) {
     return memcmp(path + path_len - suffix_len, suffix, suffix_len) == 0;
 }
 
+// Track last reap time to avoid running too frequently
+static _Atomic time_t last_reap_time = 0;
+#define POOL_REAP_INTERVAL 60  // Run reaper at most every 60 seconds
+
 // Reap idle connections from pool (close connections idle > POOL_IDLE_TIMEOUT)
-// NOTE: Currently disabled (causes race conditions with new state machine)
-// Connections are cleaned up on close or reused via PHASE 2/4
+// Uses atomic CAS to safely claim slots before closing - no race conditions
 static void pool_reap_idle_connections(void) {
     time_t now = time(NULL);
     int reaped = 0;
+    int free_with_conn = 0;  // Count FREE slots that have connections
 
     // Only reap FREE slots with old connections - use atomic CAS to claim
     for (int i = 0; i < configured_pool_size; i++) {
@@ -513,9 +517,26 @@ static void pool_reap_idle_connections(void) {
         }
     }
 
-    if (reaped > 0) {
-        LOG_INFO("Pool reaper: closed %d idle connections", reaped);
+    // Count slots by state
+    int slots_free = 0, slots_ready = 0, slots_reserved = 0, slots_other = 0;
+    int conns_total = 0;
+    for (int i = 0; i < configured_pool_size; i++) {
+        pool_slot_state_t state = atomic_load(&library_pool[i].state);
+        if (library_pool[i].conn) conns_total++;
+        if (state == SLOT_FREE) {
+            slots_free++;
+            if (library_pool[i].conn) free_with_conn++;
+        } else if (state == SLOT_READY) {
+            slots_ready++;
+        } else if (state == SLOT_RESERVED) {
+            slots_reserved++;
+        } else {
+            slots_other++;
+        }
     }
+
+    LOG_INFO("Pool reaper: reaped=%d conns=%d slots: FREE=%d(with_conn=%d) READY=%d RESERVED=%d OTHER=%d",
+             reaped, conns_total, slots_free, free_with_conn, slots_ready, slots_reserved, slots_other);
 }
 
 static pg_connection_t* create_pool_connection(const char *db_path) {
@@ -691,6 +712,17 @@ static pg_connection_t* pool_get_connection(const char *db_path) {
                 LOG_INFO("Pool: released stale slot %d (idle %lds)",
                         i, (long)(now - library_pool[i].last_used));
             }
+        }
+    }
+
+    // Run pool reaper periodically to close FREE connections that have been idle
+    // Rate-limited to avoid overhead on every pool_get_connection() call
+    time_t last_reap = atomic_load(&last_reap_time);
+    if ((now - last_reap) >= POOL_REAP_INTERVAL) {
+        // Use CAS to avoid multiple threads running reaper simultaneously
+        if (atomic_compare_exchange_strong(&last_reap_time, &last_reap, now)) {
+            LOG_INFO("Pool reaper: running (last run %ld seconds ago)", now - last_reap);
+            pool_reap_idle_connections();
         }
     }
 
@@ -884,7 +916,7 @@ static pg_connection_t* pool_get_connection(const char *db_path) {
     // Dump slot states for debugging
     for (int i = 0; i < configured_pool_size; i++) {
         pool_slot_state_t state = atomic_load(&library_pool[i].state);
-        LOG_ERROR("Pool slot %d: state=%d conn=%p owner=%p",
+        LOG_DEBUG("Pool slot %d: state=%d conn=%p owner=%p",
                  i, (int)state, (void*)library_pool[i].conn, (void*)library_pool[i].owner_thread);
     }
     LOG_ERROR("Pool: no available slots for thread %p (all %d slots busy)", (void*)current_thread, configured_pool_size);
@@ -927,7 +959,7 @@ int pg_pool_check_connection_health(pg_connection_t *conn) {
     }
 
     // Connection is bad - need to reset
-    LOG_ERROR("Pool: connection health check failed (status=%d), resetting", status);
+    LOG_INFO("Pool: connection health check failed (status=%d), resetting", status);
 
     pthread_t current_thread = pthread_self();
 
@@ -1010,9 +1042,10 @@ void pg_close_pool_for_db(sqlite3 *db) {
             // Only release if in READY state (not while RECONNECTING)
             if (current_state == SLOT_READY) {
                 library_pool[pool_slot].owner_thread = 0;
-                library_pool[pool_slot].last_used = time(NULL);
-                // Keep state READY - connection is still valid, just unowned
-                // Another thread will claim it in PHASE 1 or it will be reused
+                // NOTE: Don't reset last_used here! Keep the timestamp from last actual query.
+                // This allows the reaper to properly measure idle time from last use,
+                // not from release time. Otherwise connections would never appear idle
+                // if they are periodically released but never used.
                 atomic_store(&library_pool[pool_slot].state, SLOT_FREE);
             }
         }

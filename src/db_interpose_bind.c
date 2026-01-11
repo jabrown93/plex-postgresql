@@ -43,7 +43,7 @@ int pg_map_param_index(pg_stmt_t *pg_stmt, sqlite3_stmt *pStmt, int sqlite_idx) 
                     return i;  // Found it! Return the PostgreSQL position
                 }
             }
-            LOG_ERROR("Named parameter '%s' not found in translation (sqlite_idx=%d)", clean_name, sqlite_idx);
+            LOG_DEBUG("Named parameter '%s' not found in translation (sqlite_idx=%d)", clean_name, sqlite_idx);
         } else {
             LOG_DEBUG("  -> No parameter name, using direct mapping");
         }

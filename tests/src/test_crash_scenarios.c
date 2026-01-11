@@ -620,59 +620,235 @@ void test_loop_different_queries(void) {
 // ============================================================================
 // CRASH SCENARIO 7: OnDeck Special Case (2026-01-07)
 // Bug: OnDeck queries with <100KB stack crash in Metal/dyld
-// Fix: Return empty result for OnDeck queries on low stack
+// Fix: Use PostgreSQL fast path for OnDeck queries on low stack
 // ============================================================================
 
-static int should_skip_ondeck(const char *sql, size_t stack_remaining) {
+// OnDeck query detection thresholds
+#define ONDECK_STACK_THRESHOLD 100000   // 100KB - OnDeck queries need extra stack for Metal
+#define STACK_CRITICAL_THRESHOLD 64000  // 64KB - Critical threshold for all queries
+
+// Simulate OnDeck query detection (matches db_interpose_prepare.c logic)
+static int is_ondeck_query(const char *sql) {
     if (!sql) return 0;
 
-    // Check for OnDeck query
-    int is_ondeck = (safe_strcasestr(sql, "includeOnDeck") != NULL);
-
-    // Special handling: OnDeck needs extra stack for Metal framework
-    if (is_ondeck && stack_remaining < 100000) {
-        return 1;  // Skip to prevent dyld crash
+    // Match the actual OnDeck query patterns from db_interpose_prepare.c:387-391
+    // OnDeck queries are identified by their SQL pattern:
+    // 1. Queries with metadata_item_settings AND metadata_items
+    // 2. Queries with metadata_item_views AND grandparents
+    // 3. Queries with grandparentsSettings
+    if ((safe_strcasestr(sql, "metadata_item_settings") && safe_strcasestr(sql, "metadata_items")) ||
+        (safe_strcasestr(sql, "metadata_item_views") && safe_strcasestr(sql, "grandparents")) ||
+        safe_strcasestr(sql, "grandparentsSettings")) {
+        return 1;
     }
 
     return 0;
 }
 
-void test_ondeck_low_stack_skip(void) {
-    TEST("OnDeck - skipped on critically low stack (<100KB)");
+// Simulate OnDeck stack protection (matches db_interpose_prepare.c logic)
+typedef enum {
+    ONDECK_PROCEED = 0,       // Normal execution
+    ONDECK_USE_PG_FAST = 1,   // Use PostgreSQL fast path (low stack)
+    ONDECK_FALLBACK = 2       // No PG connection, return empty (critical)
+} ondeck_action_t;
 
-    const char *sql = "SELECT * FROM view WHERE includeOnDeck=1";
+static ondeck_action_t check_ondeck_stack_protection(const char *sql, size_t stack_remaining, int has_pg_conn) {
+    if (!sql) return ONDECK_PROCEED;
 
-    int skip = should_skip_ondeck(sql, 42000);  // 42KB - actual crash value
+    int is_ondeck = is_ondeck_query(sql);
 
-    if (skip) {
+    // OnDeck queries with low stack (<100KB) get special handling
+    if (is_ondeck && stack_remaining < ONDECK_STACK_THRESHOLD) {
+        if (has_pg_conn) {
+            return ONDECK_USE_PG_FAST;  // Route to PostgreSQL fast path
+        } else {
+            return ONDECK_FALLBACK;     // Return empty result (SQLITE_ERROR equivalent)
+        }
+    }
+
+    return ONDECK_PROCEED;
+}
+
+// Simulate general stack critical check
+static int should_reject_critical_stack(size_t stack_remaining, int is_worker) {
+    int threshold = is_worker ? 32000 : STACK_CRITICAL_THRESHOLD;
+    return stack_remaining < threshold;
+}
+
+// ---- Test 1: OnDeck query detection ----
+void test_ondeck_query_detection(void) {
+    TEST("OnDeck - query pattern detection");
+
+    // These should be detected as OnDeck queries
+    int detect1 = is_ondeck_query("SELECT * FROM metadata_item_settings JOIN metadata_items");
+    int detect2 = is_ondeck_query("SELECT * FROM metadata_item_views WHERE grandparents.id = 1");
+    int detect3 = is_ondeck_query("SELECT grandparentsSettings FROM config");
+
+    // These should NOT be detected as OnDeck queries
+    int detect4 = is_ondeck_query("SELECT * FROM metadata_items");
+    int detect5 = is_ondeck_query("SELECT * FROM library_sections");
+    int detect6 = is_ondeck_query("INSERT INTO statistics_media VALUES (1,2,3)");
+    int detect7 = is_ondeck_query(NULL);
+
+    if (detect1 && detect2 && detect3 && !detect4 && !detect5 && !detect6 && !detect7) {
         PASS();
     } else {
-        FAIL("Should skip OnDeck with 42KB stack");
+        FAIL("OnDeck query pattern detection incorrect");
+    }
+}
+
+// ---- Test 2: OnDeck skipped on low stack ----
+void test_ondeck_skipped_on_low_stack(void) {
+    TEST("OnDeck - uses PG fast path when stack < 100KB");
+
+    const char *ondeck_sql = "SELECT * FROM metadata_item_settings JOIN metadata_items";
+
+    // Test with 42KB remaining (actual crash scenario value)
+    ondeck_action_t action1 = check_ondeck_stack_protection(ondeck_sql, 42000, 1);
+    // Test with 80KB remaining
+    ondeck_action_t action2 = check_ondeck_stack_protection(ondeck_sql, 80000, 1);
+    // Test with 99KB remaining (just under threshold)
+    ondeck_action_t action3 = check_ondeck_stack_protection(ondeck_sql, 99000, 1);
+
+    if (action1 == ONDECK_USE_PG_FAST && action2 == ONDECK_USE_PG_FAST && action3 == ONDECK_USE_PG_FAST) {
+        PASS();
+    } else {
+        FAIL("OnDeck should use PG fast path when stack < 100KB");
+    }
+}
+
+// ---- Test 3: OnDeck allowed on normal stack ----
+void test_ondeck_allowed_on_normal_stack(void) {
+    TEST("OnDeck - proceeds normally when stack > 100KB");
+
+    const char *ondeck_sql = "SELECT * FROM metadata_item_settings JOIN metadata_items";
+
+    // Test with 200KB remaining
+    ondeck_action_t action1 = check_ondeck_stack_protection(ondeck_sql, 200000, 1);
+    // Test with 100KB remaining (at threshold)
+    ondeck_action_t action2 = check_ondeck_stack_protection(ondeck_sql, 100000, 1);
+    // Test with 500KB remaining
+    ondeck_action_t action3 = check_ondeck_stack_protection(ondeck_sql, 500000, 1);
+
+    if (action1 == ONDECK_PROCEED && action2 == ONDECK_PROCEED && action3 == ONDECK_PROCEED) {
+        PASS();
+    } else {
+        FAIL("OnDeck should proceed normally when stack >= 100KB");
+    }
+}
+
+// ---- Test 4: Non-OnDeck queries not affected ----
+void test_non_ondeck_not_affected(void) {
+    TEST("Non-OnDeck queries - not affected by OnDeck skip logic");
+
+    const char *regular_sql = "SELECT * FROM metadata_items WHERE id = 1";
+    const char *insert_sql = "INSERT INTO statistics VALUES (1, 2, 3)";
+    const char *library_sql = "SELECT * FROM library_sections";
+
+    // Even with low stack, non-OnDeck queries should proceed normally
+    ondeck_action_t action1 = check_ondeck_stack_protection(regular_sql, 42000, 1);
+    ondeck_action_t action2 = check_ondeck_stack_protection(insert_sql, 42000, 1);
+    ondeck_action_t action3 = check_ondeck_stack_protection(library_sql, 42000, 1);
+    ondeck_action_t action4 = check_ondeck_stack_protection(NULL, 42000, 1);
+
+    if (action1 == ONDECK_PROCEED && action2 == ONDECK_PROCEED &&
+        action3 == ONDECK_PROCEED && action4 == ONDECK_PROCEED) {
+        PASS();
+    } else {
+        FAIL("Non-OnDeck queries should not be affected by OnDeck logic");
+    }
+}
+
+// ---- Test 5: Stack critical threshold triggers fallback ----
+void test_stack_critical_threshold(void) {
+    TEST("Stack critical threshold - 64KB triggers fallback for all queries");
+
+    // Below 64KB should reject
+    int reject1 = should_reject_critical_stack(63000, 0);  // 63KB - below threshold
+    int reject2 = should_reject_critical_stack(50000, 0);  // 50KB - well below
+    int reject3 = should_reject_critical_stack(32000, 0);  // 32KB - very low
+
+    // At or above 64KB should not reject
+    int reject4 = should_reject_critical_stack(64000, 0);  // 64KB - at threshold
+    int reject5 = should_reject_critical_stack(65000, 0);  // 65KB - above threshold
+    int reject6 = should_reject_critical_stack(200000, 0); // 200KB - plenty of stack
+
+    // Worker threads have lower threshold (32KB)
+    int reject7 = should_reject_critical_stack(31000, 1);  // Below worker threshold
+    int reject8 = should_reject_critical_stack(32000, 1);  // At worker threshold
+
+    if (reject1 && reject2 && reject3 &&
+        !reject4 && !reject5 && !reject6 &&
+        reject7 && !reject8) {
+        PASS();
+    } else {
+        FAIL("64KB critical threshold not working correctly");
+    }
+}
+
+// ---- Test 6: Graceful fallback to SQLite ----
+void test_graceful_fallback_to_sqlite(void) {
+    TEST("OnDeck - graceful fallback when no PG connection (returns SQLITE_ERROR equiv)");
+
+    const char *ondeck_sql = "SELECT * FROM metadata_item_settings JOIN metadata_items";
+
+    // When PG connection is available, use fast path
+    ondeck_action_t action1 = check_ondeck_stack_protection(ondeck_sql, 42000, 1);  // has_pg_conn=1
+
+    // When NO PG connection, fallback to empty result (triggers SQLite fallback)
+    ondeck_action_t action2 = check_ondeck_stack_protection(ondeck_sql, 42000, 0);  // has_pg_conn=0
+    ondeck_action_t action3 = check_ondeck_stack_protection(ondeck_sql, 80000, 0);  // has_pg_conn=0
+
+    // Normal stack should proceed regardless of PG connection
+    ondeck_action_t action4 = check_ondeck_stack_protection(ondeck_sql, 200000, 0);  // has_pg_conn=0, normal stack
+
+    if (action1 == ONDECK_USE_PG_FAST &&
+        action2 == ONDECK_FALLBACK &&
+        action3 == ONDECK_FALLBACK &&
+        action4 == ONDECK_PROCEED) {
+        PASS();
+    } else {
+        FAIL("Graceful fallback not working correctly");
+    }
+}
+
+// Legacy tests kept for backwards compatibility
+void test_ondeck_low_stack_skip(void) {
+    TEST("OnDeck - (legacy) skipped on critically low stack (<100KB)");
+
+    const char *sql = "SELECT * FROM metadata_item_settings JOIN metadata_items";
+
+    ondeck_action_t action = check_ondeck_stack_protection(sql, 42000, 1);
+
+    if (action == ONDECK_USE_PG_FAST) {
+        PASS();
+    } else {
+        FAIL("Should use PG fast path with 42KB stack");
     }
 }
 
 void test_ondeck_normal_stack_ok(void) {
-    TEST("OnDeck - allowed on normal stack (>100KB)");
+    TEST("OnDeck - (legacy) allowed on normal stack (>100KB)");
 
-    const char *sql = "SELECT * FROM view WHERE includeOnDeck=1";
+    const char *sql = "SELECT * FROM metadata_item_settings JOIN metadata_items";
 
-    int skip = should_skip_ondeck(sql, 200000);  // 200KB - should be fine
+    ondeck_action_t action = check_ondeck_stack_protection(sql, 200000, 1);
 
-    if (!skip) {
+    if (action == ONDECK_PROCEED) {
         PASS();
     } else {
-        FAIL("Should not skip OnDeck with 200KB stack");
+        FAIL("Should proceed normally with 200KB stack");
     }
 }
 
 void test_non_ondeck_low_stack_ok(void) {
-    TEST("Non-OnDeck queries - not affected by OnDeck skip");
+    TEST("Non-OnDeck queries - (legacy) not affected by OnDeck skip");
 
     const char *sql = "SELECT * FROM metadata_items";
 
-    int skip = should_skip_ondeck(sql, 42000);  // Low stack but not OnDeck
+    ondeck_action_t action = check_ondeck_stack_protection(sql, 42000, 1);
 
-    if (!skip) {
+    if (action == ONDECK_PROCEED) {
         PASS();
     } else {
         FAIL("Non-OnDeck should not be skipped");
@@ -716,7 +892,15 @@ int main(void) {
     test_loop_218_repeats();
     test_loop_different_queries();
 
-    printf("\n\033[1m7. OnDeck Special Handling:\033[0m\n");
+    printf("\n\033[1m7. OnDeck Stack Protection:\033[0m\n");
+    test_ondeck_query_detection();
+    test_ondeck_skipped_on_low_stack();
+    test_ondeck_allowed_on_normal_stack();
+    test_non_ondeck_not_affected();
+    test_stack_critical_threshold();
+    test_graceful_fallback_to_sqlite();
+
+    printf("\n\033[1m7b. OnDeck Legacy Tests (backwards compatibility):\033[0m\n");
     test_ondeck_low_stack_skip();
     test_ondeck_normal_stack_ok();
     test_non_ondeck_low_stack_ok();

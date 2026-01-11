@@ -564,6 +564,166 @@ static void test_window_dense_rank(void) {
 }
 
 // ============================================================================
+// FTS Quote Parsing Tests (Bug Fix Tests)
+// Tests that MATCH queries with SQL-escaped quotes are correctly translated
+// ============================================================================
+
+static void test_fts_single_escaped_quote(void) {
+    TEST("FTS Quote - single escaped quote (it''s*)");
+    sql_translation_t result = sql_translate(
+        "SELECT * FROM fts4_metadata_titles WHERE title MATCH '(it''s*)'");
+
+    // The '' should be unescaped to ' and the term should be valid tsquery
+    // Result should have to_tsquery and the term should be properly formatted
+    if (result.success && result.sql &&
+        strcasestr(result.sql, "to_tsquery") &&
+        !strstr(result.sql, "''")) {  // No double quotes should remain in tsquery
+        PASS();
+    } else {
+        FAIL("Single escaped quote should be unescaped in tsquery");
+        if (result.sql) printf("    Got: %s\n", result.sql);
+    }
+
+    sql_translation_free(&result);
+}
+
+static void test_fts_double_escaped_quote(void) {
+    TEST("FTS Quote - double escaped quote (test''''test*)");
+    sql_translation_t result = sql_translate(
+        "SELECT * FROM fts4_metadata_titles WHERE title MATCH '(test''''test*)'");
+
+    // '''' in SQL represents '' (two actual quotes) which should become one quote
+    if (result.success && result.sql &&
+        strcasestr(result.sql, "to_tsquery")) {
+        PASS();
+    } else {
+        FAIL("Double escaped quote should be handled");
+        if (result.sql) printf("    Got: %s\n", result.sql);
+    }
+
+    sql_translation_free(&result);
+}
+
+static void test_fts_simple_term(void) {
+    TEST("FTS Quote - simple term (no quotes)");
+    sql_translation_t result = sql_translate(
+        "SELECT * FROM fts4_metadata_titles WHERE title MATCH 'simple'");
+
+    // Basic case should still work
+    if (result.success && result.sql &&
+        strcasestr(result.sql, "to_tsquery") &&
+        strcasestr(result.sql, "simple")) {
+        PASS();
+    } else {
+        FAIL("Simple term should be translated to tsquery");
+        if (result.sql) printf("    Got: %s\n", result.sql);
+    }
+
+    sql_translation_free(&result);
+}
+
+static void test_fts_mixed_quotes_and_terms(void) {
+    TEST("FTS Quote - mixed quotes and wildcards");
+    sql_translation_t result = sql_translate(
+        "SELECT * FROM fts4_metadata_titles WHERE title MATCH '(don''t* stop*)'");
+
+    // Should handle both the escaped quote and the wildcards
+    if (result.success && result.sql &&
+        strcasestr(result.sql, "to_tsquery") &&
+        strstr(result.sql, ":*")) {  // Wildcard should be converted to :*
+        PASS();
+    } else {
+        FAIL("Mixed quotes and wildcards should work together");
+        if (result.sql) printf("    Got: %s\n", result.sql);
+    }
+
+    sql_translation_free(&result);
+}
+
+// ============================================================================
+// JSON Operator Parameter Tests (Bug Fix Tests)
+// Tests that JSON operators with parameter placeholders work correctly
+// ============================================================================
+
+static void test_json_operator_with_parameter(void) {
+    TEST("JSON Op - column ->> '$.key' < $3 should consume parameter");
+    sql_translation_t result = sql_translate(
+        "SELECT * FROM t WHERE extra_data ->> '$.pv:version' < $3");
+
+    // The JSON operator should be translated to LIKE pattern
+    // and the $3 parameter should NOT appear dangling in the output
+    if (result.success && result.sql) {
+        // Check that we got a LIKE pattern (the fix converts ->> to LIKE)
+        int has_like = strcasestr(result.sql, "LIKE") != NULL;
+        // Check that $3 is NOT dangling (it should be consumed by the LIKE translation)
+        int no_dangling_param = strstr(result.sql, " $3") == NULL;
+
+        if (has_like && no_dangling_param) {
+            PASS();
+        } else {
+            FAIL("JSON operator should consume parameter");
+            printf("    has_like=%d no_dangling_param=%d\n", has_like, no_dangling_param);
+            printf("    Got: %s\n", result.sql);
+        }
+    } else {
+        FAIL("Translation failed");
+    }
+
+    sql_translation_free(&result);
+}
+
+static void test_json_operator_with_literal(void) {
+    TEST("JSON Op - column ->> '$.key' < '1' should work");
+    sql_translation_t result = sql_translate(
+        "SELECT * FROM t WHERE extra_data ->> '$.pv:version' < '1'");
+
+    // Should be converted to LIKE pattern
+    if (result.success && result.sql &&
+        strcasestr(result.sql, "LIKE")) {
+        PASS();
+    } else {
+        FAIL("JSON operator with literal should convert to LIKE");
+        if (result.sql) printf("    Got: %s\n", result.sql);
+    }
+
+    sql_translation_free(&result);
+}
+
+static void test_json_operator_is_null(void) {
+    TEST("JSON Op - column ->> '$.key' IS NULL");
+    sql_translation_t result = sql_translate(
+        "SELECT * FROM t WHERE extra_data ->> '$.pv:version' IS NULL");
+
+    // Should be converted to NOT LIKE pattern for IS NULL check
+    if (result.success && result.sql &&
+        strcasestr(result.sql, "NOT LIKE")) {
+        PASS();
+    } else {
+        FAIL("JSON IS NULL should convert to NOT LIKE");
+        if (result.sql) printf("    Got: %s\n", result.sql);
+    }
+
+    sql_translation_free(&result);
+}
+
+static void test_json_operator_param_position(void) {
+    TEST("JSON Op - parameter with json cast (::json->>$N)");
+    sql_translation_t result = sql_translate(
+        "SELECT * FROM t WHERE data->>$1 = 'value'");
+
+    // The ->>$N pattern should get ::json inserted before it
+    if (result.success && result.sql &&
+        strstr(result.sql, "::json->>$1")) {
+        PASS();
+    } else {
+        FAIL("JSON operator with $N should insert ::json cast");
+        if (result.sql) printf("    Got: %s\n", result.sql);
+    }
+
+    sql_translation_free(&result);
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
@@ -622,6 +782,18 @@ int main(void) {
     test_window_row_number();
     test_window_rank();
     test_window_dense_rank();
+
+    printf("\n\033[1mFTS Quote Parsing (Bug Fix):\033[0m\n");
+    test_fts_single_escaped_quote();
+    test_fts_double_escaped_quote();
+    test_fts_simple_term();
+    test_fts_mixed_quotes_and_terms();
+
+    printf("\n\033[1mJSON Operator Parameters (Bug Fix):\033[0m\n");
+    test_json_operator_with_parameter();
+    test_json_operator_with_literal();
+    test_json_operator_is_null();
+    test_json_operator_param_position();
 
     // Cleanup
     sql_translator_cleanup();

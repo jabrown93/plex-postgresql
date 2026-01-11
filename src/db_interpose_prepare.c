@@ -152,11 +152,26 @@ char* simplify_fts_for_sqlite(const char *sql) {
         while ((match_pos = strcasestr(result, match_patterns[p])) != NULL) {
             char *quote_start = strchr(match_pos, '\'');
             if (!quote_start) break;
-            char *quote_end = strchr(quote_start + 1, '\'');
-            if (!quote_end) break;
+            
+            // Find closing quote, handling SQL escaped quotes ('')
+            char *quote_end = quote_start + 1;
+            while (*quote_end) {
+                if (*quote_end == '\'') {
+                    // Check if next char is also quote (escaped quote '')
+                    if (*(quote_end + 1) == '\'') {
+                        quote_end += 2;  // Skip both quotes
+                        continue;
+                    }
+                    break;  // Found real closing quote
+                }
+                quote_end++;
+            }
+            if (*quote_end != '\'') break;  // No closing quote found
 
-            // Replace with "1=1"
-            const char *replacement = "1=1";
+            // Replace entire "fts_table.col match 'term'" with "1=0"
+            // Using 1=0 (FALSE) so SQLite shadow query returns no results
+            // The real work is done by PostgreSQL with proper tsquery
+            const char *replacement = "1=0";
             size_t old_len = (quote_end + 1) - match_pos;
             size_t new_len = strlen(replacement);
 

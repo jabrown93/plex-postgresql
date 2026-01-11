@@ -48,6 +48,12 @@ const char * volatile last_column_being_accessed = NULL;
 volatile long global_value_type_calls = 0;
 volatile long global_column_type_calls = 0;
 
+// Thread-local counters for more accurate debugging (track per-thread shim activity)
+// These help distinguish which thread actually triggered the exception
+static __thread long tls_value_type_calls = 0;
+static __thread long tls_column_type_calls = 0;
+static __thread const char *tls_last_query = NULL;
+
 // C++ std::type_info has a virtual method name() - we access it via the vtable
 // The first pointer in the object is the vtable, and name() is typically the first virtual method
 typedef struct {
@@ -519,13 +525,24 @@ void __cxa_throw(void *thrown_exception, void *tinfo, void (*dest)(void*)) {
         const char *readable_name = demangled ? demangled : type_name;
 
         // Capture context FIRST (before any calls that might fail)
+        // Global state (may be from any thread)
         const char *ctx_query = last_query_being_processed;
         const char *ctx_column = last_column_being_accessed;
         long ctx_value_calls = global_value_type_calls;
         long ctx_column_calls = global_column_type_calls;
 
+        // Thread-local state (specific to this thread)
+        long tls_col_calls = tls_column_type_calls;
+        long tls_val_calls = tls_value_type_calls;
+        const char *tls_query = tls_last_query;
+
         // Determine if this is shim-related (our code was in the call path)
         int is_shim_related = (ctx_value_calls > 0 || ctx_column_calls > 0 || ctx_query != NULL);
+
+        // Check if THIS specific thread has done any shim work
+        int tls_is_shim_related = (tls_col_calls > 0 || tls_val_calls > 0 || tls_query != NULL);
+
+        pthread_t tid = pthread_self();
 
         // Build a concise summary
         fprintf(stderr, "\n");
@@ -534,21 +551,30 @@ void __cxa_throw(void *thrown_exception, void *tinfo, void (*dest)(void*)) {
                 readable_name ? readable_name : "unknown",
                 tracker ? tracker->count : total_count);
         fprintf(stderr, "╠══════════════════════════════════════════════════════════════════════╣\n");
+        fprintf(stderr, "║ PID: %-6d  Thread: 0x%-50lx ║\n", getpid(), (unsigned long)tid);
 
         if (is_shim_related) {
-            fprintf(stderr, "║ Source: SHIM-RELATED (column_type=%ld, value_type=%ld)%*s║\n",
-                    ctx_column_calls, ctx_value_calls, 16, "");
+            fprintf(stderr, "╠══════════════════════════════════════════════════════════════════════╣\n");
+            fprintf(stderr, "║ SHIM STATE:                                                          ║\n");
+            fprintf(stderr, "║   Global: col_type=%ld, val_type=%ld%*s║\n",
+                    ctx_column_calls, ctx_value_calls, 40, "");
+            fprintf(stderr, "║   Thread: col_type=%ld, val_type=%ld (this_thread_used_shim=%s)%*s║\n",
+                    tls_col_calls, tls_val_calls, tls_is_shim_related ? "YES" : "NO",
+                    tls_is_shim_related ? 10 : 11, "");
+            if (!tls_is_shim_related) {
+                fprintf(stderr, "║   NOTE: This thread has NOT made any SQLite calls through shim!    ║\n");
+            }
             if (ctx_query) {
                 // Truncate long queries
                 char query_snippet[55];
                 snprintf(query_snippet, sizeof(query_snippet), "%.54s", ctx_query);
-                fprintf(stderr, "║ Query: %-64s ║\n", query_snippet);
+                fprintf(stderr, "║   Last Query (any thread): %-43s ║\n", query_snippet);
             }
             if (ctx_column) {
-                fprintf(stderr, "║ Column: %-63s ║\n", ctx_column);
+                fprintf(stderr, "║   Last Column: %-56s ║\n", ctx_column);
             }
         } else {
-            fprintf(stderr, "║ Source: NOT SHIM-RELATED (external C++ code)%*s║\n", 26, "");
+            fprintf(stderr, "║ NOT SHIM-RELATED: No SQLite calls have been made through the shim   ║\n");
         }
 
         // Print stack trace for first occurrence of each exception type
@@ -562,12 +588,13 @@ void __cxa_throw(void *thrown_exception, void *tinfo, void (*dest)(void*)) {
         fflush(stderr);
 
         // Also log to our log file (concise version)
-        LOG_ERROR("EXCEPTION #%d [%s]: %s | shim=%s | col_calls=%ld | query=%.60s",
+        LOG_ERROR("EXCEPTION #%d [%s]: %s | shim=%s | tls_shim=%s | col=%ld | val=%ld | query=%.60s",
                   total_count,
                   readable_name ? readable_name : "?",
                   should_trace ? "FIRST_OF_TYPE" : "repeat",
                   is_shim_related ? "YES" : "NO",
-                  ctx_column_calls,
+                  tls_is_shim_related ? "YES" : "NO",
+                  ctx_column_calls, ctx_value_calls,
                   ctx_query ? ctx_query : "(none)");
 
         if (demangled) free(demangled);
@@ -750,6 +777,9 @@ pthread_mutex_t fake_value_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // Initialization flag
 int shim_initialized = 0;
+
+// Track if shim was initialized (for fork detection)
+static pid_t shim_init_pid = 0;
 
 // ============================================================================
 // Helper Functions
@@ -1168,14 +1198,24 @@ static void atfork_child(void) {
     // Use fprintf since logging may not be initialized yet
     fprintf(stderr, "[FORK_CHILD] Cleaning up inherited connection pool (child PID %d)\n", getpid());
     fflush(stderr);
-    
+
+    // Clear exception context - parent's pointers are not valid in child
+    last_query_being_processed = NULL;
+    last_column_being_accessed = NULL;
+    global_value_type_calls = 0;
+    global_column_type_calls = 0;
+
+    // Reset exception tracking for child process
+    total_exception_count = 0;
+    exception_type_count = 0;
+
     // Reset symbol verification - child needs to re-verify
     symbols_verified = 0;
 
     // Call pg_client cleanup function to clear pool state
     extern void pg_pool_cleanup_after_fork(void);
     pg_pool_cleanup_after_fork();
-    
+
     // Reset logging to prevent mutex deadlock
     extern void pg_logging_reset_after_fork(void);
     pg_logging_reset_after_fork();
@@ -1193,6 +1233,25 @@ static void shim_init(void) {
     // Write to stderr first to verify constructor runs
     fprintf(stderr, "[SHIM_INIT] Constructor starting (Linux)...\n");
     fflush(stderr);
+
+    // Detect if we're in a forked child process
+    // pthread_once doesn't reset after fork, so we need to detect this
+    pid_t current_pid = getpid();
+    if (shim_init_pid != 0 && shim_init_pid != current_pid) {
+        fprintf(stderr, "[SHIM_INIT] Detected fork (parent PID %d, our PID %d) - resetting state\n",
+                shim_init_pid, current_pid);
+        fflush(stderr);
+        // We're in a forked child - clear state and let initialization happen fresh
+        shim_initialized = 0;
+        // Reset the global context
+        last_query_being_processed = NULL;
+        last_column_being_accessed = NULL;
+        global_value_type_calls = 0;
+        global_column_type_calls = 0;
+        total_exception_count = 0;
+        exception_type_count = 0;
+    }
+    shim_init_pid = current_pid;
 
     // Install signal handlers for crash debugging (only actual crashes, not SIGABRT which is often legitimate)
     signal(SIGSEGV, signal_handler);
@@ -1220,7 +1279,7 @@ static void shim_init(void) {
 
     pg_logging_init();
     LOG_INFO("=== Plex PostgreSQL Interpose Shim loaded (Linux) ===");
-    LOG_ERROR("SHIM_CONSTRUCTOR: Initialization complete");
+    LOG_INFO("SHIM_CONSTRUCTOR: Initialization complete");
 
     // Also write to stderr after logging init
     fprintf(stderr, "[SHIM_INIT] Logging initialized\n");
