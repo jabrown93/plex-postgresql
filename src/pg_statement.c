@@ -613,6 +613,7 @@ int pg_oid_to_sqlite_type(Oid oid) {
         case 20:   // INT8
         case 21:   // INT2
         case 23:   // INT4
+        case 26:   // OID - v0.8.9.2: must match column_decltype mapping
             return SQLITE_INTEGER;
         case 700:  // FLOAT4
         case 701:  // FLOAT8

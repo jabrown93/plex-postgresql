@@ -359,6 +359,17 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                 pg_stmt->current_row = 0;
             }
 
+            // v0.8.9.1: Check if we need to re-execute due to metadata-only result
+            // When bind() was called after metadata execution, it set metadata_only_result=2
+            // to indicate we need to re-execute with the now-bound parameters
+            if (pg_stmt->result && pg_stmt->metadata_only_result == 2) {
+                LOG_DEBUG("STEP: Clearing metadata-only result for re-execution with bound params");
+                PQclear(pg_stmt->result);
+                pg_stmt->result = NULL;
+                pg_stmt->metadata_only_result = 0;
+                pg_stmt->current_row = -1;
+            }
+
             if (!pg_stmt->result) {
                 // ============================================================
                 // QUERY RESULT CACHE: Check if we have cached results
@@ -515,6 +526,9 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
 
                     // Resolve source table names for bare column lookup in decltype
                     resolve_column_tables(pg_stmt, exec_conn);
+
+                    // v0.8.9: Clear metadata-only flag now that we have a real result
+                    pg_stmt->metadata_only_result = 0;
 
                     // QUERY RESULT CACHE: Store result for potential reuse
                     // pg_query_cache_store(pg_stmt, pg_stmt->result);  // DISABLED
@@ -684,7 +698,9 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
             if (status == PGRES_COMMAND_OK || status == PGRES_TUPLES_OK) {
                 exec_conn->last_changes = atoi(PQcmdTuples(res) ?: "1");
 
-                // Extract metadata_id for play_queue_generators (for IN(NULL) fix)
+                // v0.8.9.5 FIX: For INSERT...RETURNING, log the ID but DON'T store result
+                // SOCI uses lastval() via last_insert_rowid() to get the ID, not RETURNING columns
+                // Storing result with current_row=-1 causes issues when column functions are called
                 if (status == PGRES_TUPLES_OK && PQntuples(res) > 0) {
                     const char *id_str = PQgetvalue(res, 0, 0);
                     if (id_str && *id_str) {
@@ -695,6 +711,7 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
                         sqlite3_int64 meta_id = extract_metadata_id_from_generator_sql(pg_stmt->sql);
                         if (meta_id > 0) pg_set_global_metadata_id(meta_id);
                     }
+                    // Don't store result - SOCI will use lastval() instead
                 }
             } else {
                 const char *err = (exec_conn && exec_conn->conn) ? PQerrorMessage(exec_conn->conn) : "NULL connection";
@@ -705,13 +722,19 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
 
             // Mark as executed to prevent re-execution on subsequent step() calls
             pg_stmt->write_executed = 1;
-            PQclear(res);
+
+            // v0.8.9.5: Keep RETURNING result for column access - don't clear it!
+            // SQLite returns SQLITE_ROW for INSERT...RETURNING, then SQLITE_DONE on next step()
+            if (res) PQclear(res);
         }
 
         pthread_mutex_unlock(&pg_stmt->mutex);
     }
 
     if (pg_stmt && pg_stmt->is_pg) {
+        // v0.8.9.5: WRITE statements always return SQLITE_DONE
+        // SOCI expects this and uses last_insert_rowid() to get the ID via lastval()
+        // The RETURNING result is kept for debugging but not exposed as SQLITE_ROW
         if (pg_stmt->is_pg == 1) return SQLITE_DONE;
     }
 

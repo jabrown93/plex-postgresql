@@ -501,7 +501,11 @@ static int ensure_pg_result_for_metadata(pg_stmt_t *pg_stmt) {
         // This enables proper type lookups for queries without AS aliases
         resolve_column_tables(pg_stmt, exec_conn);
 
-        LOG_INFO("METADATA_EXEC: Success - %d cols, %d rows", pg_stmt->num_cols, pg_stmt->num_rows);
+        // v0.8.9 FIX: Mark this result as from metadata-only execution
+        // If bind() is called later, we need to re-execute with bound params
+        pg_stmt->metadata_only_result = 1;
+
+        LOG_INFO("METADATA_EXEC: Success - %d cols, %d rows (metadata_only=1)", pg_stmt->num_cols, pg_stmt->num_rows);
         return 1;
     } else {
         LOG_ERROR("METADATA_EXEC: Query failed: %s", PQerrorMessage(exec_conn->conn));
@@ -518,7 +522,9 @@ static int ensure_pg_result_for_metadata(pg_stmt_t *pg_stmt) {
 int my_sqlite3_column_count(sqlite3_stmt *pStmt) {
     LOG_DEBUG("COLUMN_COUNT: stmt=%p", (void*)pStmt);
     pg_stmt_t *pg_stmt = pg_find_any_stmt(pStmt);
-    if (pg_stmt && pg_stmt->is_pg == 2) {
+    // Handle both READ (is_pg == 2) and WRITE (is_pg == 1) statements
+    // For WRITE without RETURNING result, return 0 columns (no data to read)
+    if (pg_stmt && pg_stmt->is_pg) {
         pthread_mutex_lock(&pg_stmt->mutex);
         // QUERY CACHE: Check for cached result first
         if (pg_stmt->cached_result) {
@@ -557,7 +563,9 @@ int my_sqlite3_column_type(sqlite3_stmt *pStmt, int idx) {
     global_column_type_calls++;  // Global counter for exception debugging
     LOG_DEBUG("COLUMN_TYPE: stmt=%p idx=%d", (void*)pStmt, idx);
     pg_stmt_t *pg_stmt = pg_find_any_stmt(pStmt);
-    if (pg_stmt && pg_stmt->is_pg == 2) {
+    // Handle all PostgreSQL statements
+    // For WRITE without result, return SQLITE_NULL (no data)
+    if (pg_stmt && pg_stmt->is_pg) {
         // Update exception context BEFORE locking (query is constant)
         last_query_being_processed = pg_stmt->pg_sql;
         pthread_mutex_lock(&pg_stmt->mutex);
@@ -619,7 +627,8 @@ int my_sqlite3_column_type(sqlite3_stmt *pStmt, int idx) {
 
 int my_sqlite3_column_int(sqlite3_stmt *pStmt, int idx) {
     pg_stmt_t *pg_stmt = pg_find_any_stmt(pStmt);
-    if (pg_stmt && pg_stmt->is_pg == 2) {
+    // Handle all PostgreSQL statements
+    if (pg_stmt && pg_stmt->is_pg) {
         pthread_mutex_lock(&pg_stmt->mutex);
 
         // QUERY CACHE: Check for cached result first
@@ -693,7 +702,8 @@ int my_sqlite3_column_int(sqlite3_stmt *pStmt, int idx) {
 
 sqlite3_int64 my_sqlite3_column_int64(sqlite3_stmt *pStmt, int idx) {
     pg_stmt_t *pg_stmt = pg_find_any_stmt(pStmt);
-    if (pg_stmt && pg_stmt->is_pg == 2) {
+    // Handle all PostgreSQL statements
+    if (pg_stmt && pg_stmt->is_pg) {
         pthread_mutex_lock(&pg_stmt->mutex);
 
         // QUERY CACHE: Check for cached result first
@@ -764,7 +774,8 @@ sqlite3_int64 my_sqlite3_column_int64(sqlite3_stmt *pStmt, int idx) {
 
 double my_sqlite3_column_double(sqlite3_stmt *pStmt, int idx) {
     pg_stmt_t *pg_stmt = pg_find_any_stmt(pStmt);
-    if (pg_stmt && pg_stmt->is_pg == 2) {
+    // Handle all PostgreSQL statements
+    if (pg_stmt && pg_stmt->is_pg) {
         pthread_mutex_lock(&pg_stmt->mutex);
 
         // QUERY CACHE: Check for cached result first
@@ -823,7 +834,8 @@ const unsigned char* my_sqlite3_column_text(sqlite3_stmt *pStmt, int idx) {
     LOG_DEBUG("COLUMN_TEXT: stmt=%p idx=%d", (void*)pStmt, idx);
     pg_stmt_t *pg_stmt = pg_find_any_stmt(pStmt);
     LOG_DEBUG("COLUMN_TEXT: pg_stmt=%p is_pg=%d", (void*)pg_stmt, pg_stmt ? pg_stmt->is_pg : -1);
-    if (pg_stmt && pg_stmt->is_pg == 2) {
+    // Handle all PostgreSQL statements
+    if (pg_stmt && pg_stmt->is_pg) {
         pthread_mutex_lock(&pg_stmt->mutex);
         LOG_DEBUG("COLUMN_TEXT: locked mutex, result=%p row=%d cols=%d",
                  (void*)pg_stmt->result, pg_stmt->current_row, pg_stmt->num_cols);
@@ -932,7 +944,8 @@ const unsigned char* my_sqlite3_column_text(sqlite3_stmt *pStmt, int idx) {
 
 const void* my_sqlite3_column_blob(sqlite3_stmt *pStmt, int idx) {
     pg_stmt_t *pg_stmt = pg_find_any_stmt(pStmt);
-    if (pg_stmt && pg_stmt->is_pg == 2) {
+    // Handle all PostgreSQL statements
+    if (pg_stmt && pg_stmt->is_pg) {
         pthread_mutex_lock(&pg_stmt->mutex);
 
         // QUERY CACHE: Check for cached result first
@@ -1029,7 +1042,8 @@ const void* my_sqlite3_column_blob(sqlite3_stmt *pStmt, int idx) {
 int my_sqlite3_column_bytes(sqlite3_stmt *pStmt, int idx) {
     LOG_DEBUG("COLUMN_BYTES: stmt=%p idx=%d", (void*)pStmt, idx);
     pg_stmt_t *pg_stmt = pg_find_any_stmt(pStmt);
-    if (pg_stmt && pg_stmt->is_pg == 2) {
+    // Handle all PostgreSQL statements
+    if (pg_stmt && pg_stmt->is_pg) {
         pthread_mutex_lock(&pg_stmt->mutex);
 
         // QUERY CACHE: Check for cached result first
@@ -1085,7 +1099,8 @@ int my_sqlite3_column_bytes(sqlite3_stmt *pStmt, int idx) {
 const char* my_sqlite3_column_name(sqlite3_stmt *pStmt, int idx) {
     LOG_DEBUG("COLUMN_NAME: stmt=%p idx=%d", (void*)pStmt, idx);
     pg_stmt_t *pg_stmt = pg_find_any_stmt(pStmt);
-    if (pg_stmt && pg_stmt->is_pg == 2) {
+    // Handle all PostgreSQL statements
+    if (pg_stmt && pg_stmt->is_pg) {
         pthread_mutex_lock(&pg_stmt->mutex);
         // If no result yet but we have a query, execute it to get column metadata
         // SQLite allows column_name to be called before step()
@@ -1128,7 +1143,11 @@ const char* my_sqlite3_column_name(sqlite3_stmt *pStmt, int idx) {
 const char* my_sqlite3_column_decltype(sqlite3_stmt *pStmt, int idx) {
     LOG_DEBUG("DECLTYPE_ENTRY: stmt=%p idx=%d", (void*)pStmt, idx);
     pg_stmt_t *pg_stmt = pg_find_any_stmt(pStmt);
-    if (pg_stmt && pg_stmt->is_pg == 2) {
+    // CRITICAL DEBUG: Log all decltype calls
+    LOG_ERROR("DECLTYPE_CALLED: stmt=%p idx=%d pg_stmt=%p is_pg=%d",
+             (void*)pStmt, idx, (void*)pg_stmt, pg_stmt ? pg_stmt->is_pg : -1);
+    // Handle all PostgreSQL statements
+    if (pg_stmt && pg_stmt->is_pg) {
         pthread_mutex_lock(&pg_stmt->mutex);
 
         // CRITICAL: If no result yet, execute query to get column metadata
@@ -1222,6 +1241,10 @@ const char* my_sqlite3_column_decltype(sqlite3_stmt *pStmt, int idx) {
                 break;
         }
 
+        // CRITICAL DEBUG: Log ALL decltype accesses to track down bad_cast
+        LOG_ERROR("DECLTYPE_OID_ACCESS: idx=%d col='%s' OID=%u -> '%s' sql=%.200s",
+                 idx, col_name ? col_name : "?", (unsigned)oid, decltype,
+                 pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
         if (is_metadata_type) {
             LOG_DEBUG("DECLTYPE_DEBUG: RETURNING OID-BASED='%s' for col='%s' idx=%d oid=%u",
                      decltype, col_name, idx, (unsigned)oid);
@@ -1242,7 +1265,8 @@ const char* my_sqlite3_column_decltype(sqlite3_stmt *pStmt, int idx) {
 // The sqlite3_value_* functions will decode this to return proper PostgreSQL data.
 sqlite3_value* my_sqlite3_column_value(sqlite3_stmt *pStmt, int idx) {
     pg_stmt_t *pg_stmt = pg_find_any_stmt(pStmt);
-    if (pg_stmt && pg_stmt->is_pg == 2) {
+    // Handle all PostgreSQL statements
+    if (pg_stmt && pg_stmt->is_pg) {
         pthread_mutex_lock(&pg_stmt->mutex);
         // column_value is typically called after step(), but just in case...
         if (!pg_stmt->result && !pg_stmt->cached_result && pg_stmt->pg_sql) {
@@ -1284,7 +1308,8 @@ sqlite3_value* my_sqlite3_column_value(sqlite3_stmt *pStmt, int idx) {
 int my_sqlite3_data_count(sqlite3_stmt *pStmt) {
     LOG_DEBUG("DATA_COUNT: stmt=%p", (void*)pStmt);
     pg_stmt_t *pg_stmt = pg_find_any_stmt(pStmt);
-    if (pg_stmt && pg_stmt->is_pg == 2) {
+    // Handle all PostgreSQL statements
+    if (pg_stmt && pg_stmt->is_pg) {
         pthread_mutex_lock(&pg_stmt->mutex);
         // For PostgreSQL statements, return our stored num_cols if we have a valid row
         // Don't fall through to orig_sqlite3_data_count which would fail
@@ -1322,7 +1347,7 @@ int my_sqlite3_value_type(sqlite3_value *pVal) {
         // CRITICAL FIX: Lock mutex before accessing result to prevent use-after-free
         pthread_mutex_lock(&pg_stmt->mutex);
         
-        if (pg_stmt->result && fake->row_idx < pg_stmt->num_rows && fake->col_idx < pg_stmt->num_cols) {
+        if (pg_stmt->result && fake->row_idx >= 0 && fake->row_idx < pg_stmt->num_rows && fake->col_idx < pg_stmt->num_cols) {
             int is_null = PQgetisnull(pg_stmt->result, fake->row_idx, fake->col_idx);
             Oid oid = PQftype(pg_stmt->result, fake->col_idx);
             const char *col_name = PQfname(pg_stmt->result, fake->col_idx);
@@ -1381,7 +1406,7 @@ const unsigned char* my_sqlite3_value_text(sqlite3_value *pVal) {
         pg_stmt_t *pg_stmt = (pg_stmt_t*)fake->pg_stmt;
         long call_num = atomic_fetch_add(&value_text_calls, 1);
         pthread_mutex_lock(&pg_stmt->mutex);
-        if (pg_stmt->result && fake->row_idx < pg_stmt->num_rows && fake->col_idx < pg_stmt->num_cols) {
+        if (pg_stmt->result && fake->row_idx >= 0 && fake->row_idx < pg_stmt->num_rows && fake->col_idx < pg_stmt->num_cols) {
             if (PQgetisnull(pg_stmt->result, fake->row_idx, fake->col_idx)) {
                 if (call_num % 100 == 0) {
                     LOG_INFO("VALUE_TEXT[%ld]: col=%d row=%d -> NULL (is_null)", call_num, fake->col_idx, fake->row_idx);
@@ -1433,7 +1458,7 @@ int my_sqlite3_value_int(sqlite3_value *pVal) {
         (void)call_num;  // Suppress unused warning
         
         pthread_mutex_lock(&pg_stmt->mutex);
-        if (pg_stmt->result && fake->row_idx < pg_stmt->num_rows && fake->col_idx < pg_stmt->num_cols) {
+        if (pg_stmt->result && fake->row_idx >= 0 && fake->row_idx < pg_stmt->num_rows && fake->col_idx < pg_stmt->num_cols) {
             if (PQgetisnull(pg_stmt->result, fake->row_idx, fake->col_idx)) {
                 pthread_mutex_unlock(&pg_stmt->mutex);
                 return 0;
@@ -1475,7 +1500,7 @@ sqlite3_int64 my_sqlite3_value_int64(sqlite3_value *pVal) {
         pg_stmt_t *pg_stmt = (pg_stmt_t*)fake->pg_stmt;
         
         pthread_mutex_lock(&pg_stmt->mutex);
-        if (pg_stmt->result && fake->row_idx < pg_stmt->num_rows && fake->col_idx < pg_stmt->num_cols) {
+        if (pg_stmt->result && fake->row_idx >= 0 && fake->row_idx < pg_stmt->num_rows && fake->col_idx < pg_stmt->num_cols) {
             if (PQgetisnull(pg_stmt->result, fake->row_idx, fake->col_idx)) {
                 pthread_mutex_unlock(&pg_stmt->mutex);
                 return 0;
@@ -1508,7 +1533,7 @@ double my_sqlite3_value_double(sqlite3_value *pVal) {
         pg_stmt_t *pg_stmt = (pg_stmt_t*)fake->pg_stmt;
         
         pthread_mutex_lock(&pg_stmt->mutex);
-        if (pg_stmt->result && fake->row_idx < pg_stmt->num_rows && fake->col_idx < pg_stmt->num_cols) {
+        if (pg_stmt->result && fake->row_idx >= 0 && fake->row_idx < pg_stmt->num_rows && fake->col_idx < pg_stmt->num_cols) {
             if (PQgetisnull(pg_stmt->result, fake->row_idx, fake->col_idx)) {
                 pthread_mutex_unlock(&pg_stmt->mutex);
                 return 0.0;
@@ -1541,7 +1566,7 @@ int my_sqlite3_value_bytes(sqlite3_value *pVal) {
         pg_stmt_t *pg_stmt = (pg_stmt_t*)fake->pg_stmt;
         
         pthread_mutex_lock(&pg_stmt->mutex);
-        if (pg_stmt->result && fake->row_idx < pg_stmt->num_rows && fake->col_idx < pg_stmt->num_cols) {
+        if (pg_stmt->result && fake->row_idx >= 0 && fake->row_idx < pg_stmt->num_rows && fake->col_idx < pg_stmt->num_cols) {
             if (PQgetisnull(pg_stmt->result, fake->row_idx, fake->col_idx)) {
                 pthread_mutex_unlock(&pg_stmt->mutex);
                 return 0;
@@ -1568,7 +1593,7 @@ const void* my_sqlite3_value_blob(sqlite3_value *pVal) {
     if (fake && fake->pg_stmt) {
         pg_stmt_t *pg_stmt = (pg_stmt_t*)fake->pg_stmt;
         pthread_mutex_lock(&pg_stmt->mutex);
-        if (pg_stmt->result && fake->row_idx < pg_stmt->num_rows && fake->col_idx < pg_stmt->num_cols) {
+        if (pg_stmt->result && fake->row_idx >= 0 && fake->row_idx < pg_stmt->num_rows && fake->col_idx < pg_stmt->num_cols) {
             if (PQgetisnull(pg_stmt->result, fake->row_idx, fake->col_idx)) {
                 pthread_mutex_unlock(&pg_stmt->mutex);
                 return NULL;

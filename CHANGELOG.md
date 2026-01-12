@@ -5,6 +5,67 @@ All notable changes to plex-postgresql will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.9.5] - 2026-01-12
+
+### Fixed
+- **Row index -1 out of bounds error** - libpq "row number -1 is out of range" error
+  - Root cause: WRITE statements with RETURNING set `current_row = -1`
+  - Column functions using fake values could access libpq with invalid row index
+  - Added `row_idx >= 0` check to all fake value access points
+  - Column functions now handle all PostgreSQL statements properly (not just those with results)
+
+- **INSERT...RETURNING result storage causing issues**
+  - Don't store RETURNING result for WRITE statements
+  - SOCI uses `lastval()` via SQL translation, not the RETURNING columns
+  - Prevents confusion from mixing WRITE and READ result handling
+
+### Changed
+- Column functions now use simpler `pg_stmt->is_pg` check instead of `is_pg == 2 || (is_pg == 1 && result)`
+- This ensures proper fallback behavior for all PostgreSQL-intercepted statements
+
+## [0.8.9.1] - 2026-01-12
+
+### Fixed
+- **Memory corruption when clearing metadata results** - Race condition in PQclear()
+  - Root cause: v0.8.9's `clear_metadata_result_if_needed()` called `PQclear()` during bind operations
+  - This caused race conditions when multiple threads accessed the same prepared statement result
+  - Crash in libpq's `resetPQExpBuffer` with corrupted address `0x4d55545a00000000` (ASCII "MUTZ")
+  - Solution: Don't call `PQclear()` in bind functions - set `metadata_only_result = 2` instead
+  - Actual cleanup now handled safely in `step()` where proper locking is in place
+
+### Changed
+- `clear_metadata_result_if_needed()` now sets flag to 2 instead of calling PQclear()
+- `step()` checks for `metadata_only_result == 2` to safely cleanup and re-execute
+
+## [0.8.9] - 2026-01-11
+
+### Fixed
+- **Metadata-only results blocking step() re-execution** - "Step didn't return row" errors
+  - Root cause: `ensure_pg_result_for_metadata()` executed queries BEFORE parameters were bound
+  - This cached 0-row results, and `step()` saw the cached result instead of re-executing
+  - Solution: Added `metadata_only_result` flag to track pre-step execution
+  - Bind functions now clear this cached result via `clear_metadata_result_if_needed()`
+  - `step()` properly re-executes with bound parameters
+
+### Changed
+- All 9 bind functions now call `clear_metadata_result_if_needed()` before binding
+- `ensure_pg_result_for_metadata()` sets `metadata_only_result = 1` flag
+- `step()` clears the flag after successful execution
+
+## [0.8.8] - 2026-01-11
+
+### Fixed
+- **Bind functions not checking cached statement registry** - Race condition for cached statements
+  - Root cause: `pg_find_stmt()` only checked primary registry, returning NULL for cached statements
+  - This caused bind operations on cached statements to have no mutex protection
+  - Solution: Use `pg_find_any_stmt()` which checks BOTH primary and cached registries
+  - Applied to all 9 bind functions for consistent thread-safety
+
+- **Auto-reset busy statements before binding**
+  - Added `ensure_stmt_not_busy()` helper to auto-reset statements that are still in-use
+  - Prevents SQLITE_MISUSE (21) "bind on busy prepared statement" errors
+  - Called before every bind operation
+
 ## [0.8.7] - 2026-01-11
 
 ### Fixed

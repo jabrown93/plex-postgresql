@@ -103,14 +103,60 @@ char* bytes_to_pg_hex(const unsigned char *data, size_t len) {
 }
 
 // ============================================================================
+// Busy Statement Auto-Reset
+// ============================================================================
+
+// CRITICAL FIX v0.8.8: Auto-reset busy statements before binding
+// When Plex reuses prepared statements across threads, binding can fail with
+// SQLITE_MISUSE (21) "bind on a busy prepared statement" if a previous step()
+// hasn't been fully consumed. This helper auto-resets in that situation.
+static inline void ensure_stmt_not_busy(sqlite3_stmt *pStmt) {
+    if (orig_sqlite3_stmt_busy && orig_sqlite3_stmt_busy(pStmt)) {
+        LOG_DEBUG("BIND: Auto-resetting busy statement %p before bind", (void*)pStmt);
+        if (orig_sqlite3_reset) {
+            orig_sqlite3_reset(pStmt);
+        }
+    }
+}
+
+// CRITICAL FIX v0.8.9: Clear metadata-only results before binding
+// When ensure_pg_result_for_metadata() executes a query BEFORE parameters are
+// bound (e.g., Plex calls column_decltype() before bind()), it caches a result
+// with NULL/unbound params that may return 0 rows. When bind() is called, we
+// must clear this stale result so step() will re-execute with bound params.
+// This fixes "Step didn't return row" exceptions.
+//
+// v0.8.9.1 FIX: Don't PQclear here - just mark for re-execution.
+// The PQclear was causing race conditions with concurrent threads.
+// Let step() handle the cleanup safely.
+static inline void clear_metadata_result_if_needed(pg_stmt_t *pg_stmt) {
+    if (pg_stmt && pg_stmt->metadata_only_result && pg_stmt->result) {
+        LOG_DEBUG("BIND: Marking metadata-only result for re-execution with bound params");
+        // Don't PQclear here - causes race conditions
+        // Just mark that we need to re-execute with real params
+        pg_stmt->metadata_only_result = 2;  // 2 = needs re-execution
+    }
+}
+
+// NOTE: v0.8.8 uses pg_find_any_stmt() from pg_statement.h instead of pg_find_stmt()
+// This checks BOTH the primary registry AND the cached statement registry,
+// ensuring mutex protection for all bind operations including cached statements.
+
+// ============================================================================
 // Bind Functions
 // ============================================================================
 
 int my_sqlite3_bind_int(sqlite3_stmt *pStmt, int idx, int val) {
-    pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
+    pg_stmt_t *pg_stmt = pg_find_any_stmt(pStmt);
 
     // CRITICAL FIX: Lock BEFORE calling SQLite to prevent "bind on busy statement"
     if (pg_stmt) pthread_mutex_lock(&pg_stmt->mutex);
+
+    // CRITICAL FIX v0.8.9: Clear metadata-only result so step() will re-execute
+    clear_metadata_result_if_needed(pg_stmt);
+
+    // CRITICAL FIX v0.8.8: Auto-reset if statement is busy
+    ensure_stmt_not_busy(pStmt);
 
     int rc = orig_sqlite3_bind_int ? orig_sqlite3_bind_int(pStmt, idx, val) : SQLITE_ERROR;
 
@@ -128,10 +174,16 @@ int my_sqlite3_bind_int(sqlite3_stmt *pStmt, int idx, int val) {
 }
 
 int my_sqlite3_bind_int64(sqlite3_stmt *pStmt, int idx, sqlite3_int64 val) {
-    pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
+    pg_stmt_t *pg_stmt = pg_find_any_stmt(pStmt);
 
     // CRITICAL FIX: Lock BEFORE calling SQLite to prevent "bind on busy statement"
     if (pg_stmt) pthread_mutex_lock(&pg_stmt->mutex);
+
+    // CRITICAL FIX v0.8.9: Clear metadata-only result so step() will re-execute
+    clear_metadata_result_if_needed(pg_stmt);
+
+    // CRITICAL FIX v0.8.8: Auto-reset if statement is busy
+    ensure_stmt_not_busy(pStmt);
 
     int rc = orig_sqlite3_bind_int64 ? orig_sqlite3_bind_int64(pStmt, idx, val) : SQLITE_ERROR;
 
@@ -149,10 +201,16 @@ int my_sqlite3_bind_int64(sqlite3_stmt *pStmt, int idx, sqlite3_int64 val) {
 }
 
 int my_sqlite3_bind_double(sqlite3_stmt *pStmt, int idx, double val) {
-    pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
+    pg_stmt_t *pg_stmt = pg_find_any_stmt(pStmt);
 
     // CRITICAL FIX: Lock BEFORE calling SQLite to prevent "bind on busy statement"
     if (pg_stmt) pthread_mutex_lock(&pg_stmt->mutex);
+
+    // CRITICAL FIX v0.8.9: Clear metadata-only result so step() will re-execute
+    clear_metadata_result_if_needed(pg_stmt);
+
+    // CRITICAL FIX v0.8.8: Auto-reset if statement is busy
+    ensure_stmt_not_busy(pStmt);
 
     int rc = orig_sqlite3_bind_double ? orig_sqlite3_bind_double(pStmt, idx, val) : SQLITE_ERROR;
 
@@ -171,10 +229,16 @@ int my_sqlite3_bind_double(sqlite3_stmt *pStmt, int idx, double val) {
 
 int my_sqlite3_bind_text(sqlite3_stmt *pStmt, int idx, const char *val,
                          int nBytes, void (*destructor)(void*)) {
-    pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
+    pg_stmt_t *pg_stmt = pg_find_any_stmt(pStmt);
 
     // CRITICAL FIX: Lock BEFORE calling SQLite to prevent "bind on busy statement"
     if (pg_stmt) pthread_mutex_lock(&pg_stmt->mutex);
+
+    // CRITICAL FIX v0.8.9: Clear metadata-only result so step() will re-execute
+    clear_metadata_result_if_needed(pg_stmt);
+
+    // CRITICAL FIX v0.8.8: Auto-reset if statement is busy
+    ensure_stmt_not_busy(pStmt);
 
     int rc = orig_sqlite3_bind_text ? orig_sqlite3_bind_text(pStmt, idx, val, nBytes, destructor) : SQLITE_ERROR;
 
@@ -213,10 +277,16 @@ int my_sqlite3_bind_text(sqlite3_stmt *pStmt, int idx, const char *val,
 
 int my_sqlite3_bind_blob(sqlite3_stmt *pStmt, int idx, const void *val,
                          int nBytes, void (*destructor)(void*)) {
-    pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
+    pg_stmt_t *pg_stmt = pg_find_any_stmt(pStmt);
 
     // CRITICAL FIX: Lock BEFORE calling SQLite to prevent "bind on busy statement"
     if (pg_stmt) pthread_mutex_lock(&pg_stmt->mutex);
+
+    // CRITICAL FIX v0.8.9: Clear metadata-only result so step() will re-execute
+    clear_metadata_result_if_needed(pg_stmt);
+
+    // CRITICAL FIX v0.8.8: Auto-reset if statement is busy
+    ensure_stmt_not_busy(pStmt);
 
     int rc = orig_sqlite3_bind_blob ? orig_sqlite3_bind_blob(pStmt, idx, val, nBytes, destructor) : SQLITE_ERROR;
 
@@ -243,10 +313,16 @@ int my_sqlite3_bind_blob(sqlite3_stmt *pStmt, int idx, const void *val,
 // sqlite3_bind_blob64 - 64-bit version for large blobs
 int my_sqlite3_bind_blob64(sqlite3_stmt *pStmt, int idx, const void *val,
                            sqlite3_uint64 nBytes, void (*destructor)(void*)) {
-    pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
+    pg_stmt_t *pg_stmt = pg_find_any_stmt(pStmt);
 
     // CRITICAL FIX: Lock BEFORE calling SQLite to prevent "bind on busy statement"
     if (pg_stmt) pthread_mutex_lock(&pg_stmt->mutex);
+
+    // CRITICAL FIX v0.8.9: Clear metadata-only result so step() will re-execute
+    clear_metadata_result_if_needed(pg_stmt);
+
+    // CRITICAL FIX v0.8.8: Auto-reset if statement is busy
+    ensure_stmt_not_busy(pStmt);
 
     int rc = orig_sqlite3_bind_blob64 ? orig_sqlite3_bind_blob64(pStmt, idx, val, nBytes, destructor) : SQLITE_ERROR;
 
@@ -273,10 +349,16 @@ int my_sqlite3_bind_blob64(sqlite3_stmt *pStmt, int idx, const void *val,
 int my_sqlite3_bind_text64(sqlite3_stmt *pStmt, int idx, const char *val,
                            sqlite3_uint64 nBytes, void (*destructor)(void*),
                            unsigned char encoding) {
-    pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
+    pg_stmt_t *pg_stmt = pg_find_any_stmt(pStmt);
 
     // CRITICAL FIX: Lock BEFORE calling SQLite to prevent "bind on busy statement"
     if (pg_stmt) pthread_mutex_lock(&pg_stmt->mutex);
+
+    // CRITICAL FIX v0.8.9: Clear metadata-only result so step() will re-execute
+    clear_metadata_result_if_needed(pg_stmt);
+
+    // CRITICAL FIX v0.8.8: Auto-reset if statement is busy
+    ensure_stmt_not_busy(pStmt);
 
     int rc = orig_sqlite3_bind_text64 ? orig_sqlite3_bind_text64(pStmt, idx, val, nBytes, destructor, encoding) : SQLITE_ERROR;
 
@@ -313,10 +395,16 @@ int my_sqlite3_bind_text64(sqlite3_stmt *pStmt, int idx, const char *val,
 
 // sqlite3_bind_value - copies value from another sqlite3_value
 int my_sqlite3_bind_value(sqlite3_stmt *pStmt, int idx, const sqlite3_value *pValue) {
-    pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
+    pg_stmt_t *pg_stmt = pg_find_any_stmt(pStmt);
 
     // CRITICAL FIX: Lock BEFORE calling SQLite to prevent "bind on busy statement"
     if (pg_stmt) pthread_mutex_lock(&pg_stmt->mutex);
+
+    // CRITICAL FIX v0.8.9: Clear metadata-only result so step() will re-execute
+    clear_metadata_result_if_needed(pg_stmt);
+
+    // CRITICAL FIX v0.8.8: Auto-reset if statement is busy
+    ensure_stmt_not_busy(pStmt);
 
     int rc = orig_sqlite3_bind_value ? orig_sqlite3_bind_value(pStmt, idx, pValue) : SQLITE_ERROR;
 
@@ -376,10 +464,16 @@ int my_sqlite3_bind_value(sqlite3_stmt *pStmt, int idx, const sqlite3_value *pVa
 }
 
 int my_sqlite3_bind_null(sqlite3_stmt *pStmt, int idx) {
-    pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
+    pg_stmt_t *pg_stmt = pg_find_any_stmt(pStmt);
 
     // CRITICAL FIX: Lock BEFORE calling SQLite to prevent "bind on busy statement"
     if (pg_stmt) pthread_mutex_lock(&pg_stmt->mutex);
+
+    // CRITICAL FIX v0.8.9: Clear metadata-only result so step() will re-execute
+    clear_metadata_result_if_needed(pg_stmt);
+
+    // CRITICAL FIX v0.8.8: Auto-reset if statement is busy
+    ensure_stmt_not_busy(pStmt);
 
     int rc = orig_sqlite3_bind_null ? orig_sqlite3_bind_null(pStmt, idx) : SQLITE_ERROR;
 

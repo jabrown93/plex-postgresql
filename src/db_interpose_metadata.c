@@ -54,6 +54,7 @@ sqlite3_int64 my_sqlite3_changes64(sqlite3 *db) {
 sqlite3_int64 my_sqlite3_last_insert_rowid(sqlite3 *db) {
     // Prevent recursion: if we're already in an interpose call, return 0
     if (in_interpose_call) {
+        LOG_ERROR("last_insert_rowid: RECURSION DETECTED, returning 0");
         return 0;
     }
     in_interpose_call = 1;
@@ -61,37 +62,51 @@ sqlite3_int64 my_sqlite3_last_insert_rowid(sqlite3 *db) {
     pg_connection_t *pg_conn = pg_find_connection(db);
     sqlite3_int64 result = 0;
 
+    LOG_ERROR("last_insert_rowid: CALLED db=%p pg_conn=%p", (void*)db, (void*)pg_conn);
+
     // Only use PostgreSQL lastval() if we found the EXACT connection for this db
     // Using a fallback connection would return wrong values from different tables
     if (pg_conn && pg_conn->is_pg_active && pg_conn->conn) {
         // CRITICAL FIX: Lock connection mutex to prevent concurrent libpq access
         pthread_mutex_lock(&pg_conn->mutex);
+        LOG_ERROR("last_insert_rowid: EXECUTING lastval() on conn %p", (void*)pg_conn->conn);
         PGresult *res = PQexec(pg_conn->conn, "SELECT lastval()");
         ExecStatusType status = PQresultStatus(res);
+        LOG_ERROR("last_insert_rowid: STATUS=%d TUPLES=%d", status, PQntuples(res));
         if (status == PGRES_TUPLES_OK && PQntuples(res) > 0) {
-            sqlite3_int64 rowid = atoll(PQgetvalue(res, 0, 0) ?: "0");
+            const char *val_str = PQgetvalue(res, 0, 0);
+            sqlite3_int64 rowid = atoll(val_str ?: "0");
+            LOG_ERROR("last_insert_rowid: GOT VALUE=%s rowid=%lld", val_str, rowid);
             PQclear(res);
             pthread_mutex_unlock(&pg_conn->mutex);
             if (rowid > 0) {
-                LOG_DEBUG("last_insert_rowid: lastval() = %lld on conn %p for db %p",
-                        rowid, (void*)pg_conn, (void*)db);
+                LOG_ERROR("last_insert_rowid: RETURNING rowid=%lld", rowid);
                 result = rowid;
+            } else {
+                LOG_ERROR("last_insert_rowid: rowid <= 0, RETURNING 0");
             }
         } else {
             // CRITICAL FIX: lastval() fails if no INSERT has been done yet in this session
             // Return 0 (like SQLite does) instead of propagating the error
             // This prevents 500 errors when Plex calls last_insert_rowid() before INSERT
             if (status == PGRES_FATAL_ERROR) {
-                LOG_DEBUG("last_insert_rowid: lastval() not available yet (no INSERT), returning 0");
+                const char *err = PQerrorMessage(pg_conn->conn);
+                LOG_ERROR("last_insert_rowid: FATAL_ERROR: %s", err ? err : "(null)");
+            } else {
+                LOG_ERROR("last_insert_rowid: NON-TUPLES status=%d", status);
             }
             PQclear(res);
             pthread_mutex_unlock(&pg_conn->mutex);
+            LOG_ERROR("last_insert_rowid: RETURNING 0 due to error");
             // result stays 0, which is correct SQLite behavior for "no insert yet"
         }
+    } else {
+        LOG_ERROR("last_insert_rowid: NO PG_CONN or not active, RETURNING 0");
     }
     // For non-PostgreSQL databases, return 0 (safe default)
 
     in_interpose_call = 0;
+    LOG_ERROR("last_insert_rowid: FINAL result=%lld", result);
     return result;
 }
 
