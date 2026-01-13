@@ -49,7 +49,8 @@ services:
       - plex_config:/config
       - postgres_socket:/var/run/postgresql
       # Source Plex database for migration (mount your existing Plex database here)
-      - "${HOME}/Library/Application Support/Plex Media Server/Plug-in Support/Databases:/source-db:ro"
+      # OPTIONAL: Uncomment and edit path to migrate from existing database
+      # - "${HOME}/Library/Application Support/Plex Media Server/Plug-in Support/Databases:/source-db:ro"
       # Uncomment and edit to mount your media
       # - /path/to/media:/media:ro
     ports:

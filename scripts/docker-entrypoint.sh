@@ -1,6 +1,7 @@
-#!/bin/bash
+#!/usr/bin/with-contenv bash
 # Docker entrypoint for plex-postgresql
 # Initializes PostgreSQL schema before Plex starts
+# Uses with-contenv to access Docker environment variables in s6-overlay
 
 set -e
 
@@ -244,6 +245,7 @@ else
     echo "PLEX_PG_HOST not set, skipping PostgreSQL initialization"
 fi
 
-echo "Starting Plex Media Server..."
-# Execute the original entrypoint WITHOUT LD_PRELOAD (wrapper handles it)
-exec /init "$@"
+echo "PostgreSQL initialization complete"
+# When called as s6-overlay init script, just exit successfully
+# s6 will continue with the rest of the init sequence
+exit 0

@@ -22,7 +22,13 @@ SET row_security = off;
 -- Name: plex; Type: SCHEMA; Schema: -; Owner: -
 --
 
-CREATE SCHEMA plex;
+CREATE SCHEMA IF NOT EXISTS plex;
+
+--
+-- Name: pg_trgm; Type: EXTENSION; Schema: -; Owner: -
+--
+
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
 
 --

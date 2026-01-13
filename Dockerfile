@@ -122,7 +122,15 @@ COPY schema/plex_schema.sql /usr/local/lib/plex-postgresql/
 COPY schema/sqlite_schema.sql /usr/local/lib/plex-postgresql/
 COPY scripts/migrate_lib.sh /usr/local/lib/plex-postgresql/
 
-COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+# Copy the initialization script for s6-overlay
+# This will run BEFORE Plex starts as part of the init sequence
+COPY scripts/docker-entrypoint.sh /usr/local/lib/plex-postgresql/docker-entrypoint.sh
+RUN chmod +x /usr/local/lib/plex-postgresql/docker-entrypoint.sh
 
-ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+# Create s6-overlay init script to run our initialization
+RUN mkdir -p /etc/s6-overlay/s6-rc.d/init-plex-postgresql && \
+    echo "oneshot" > /etc/s6-overlay/s6-rc.d/init-plex-postgresql/type && \
+    echo "/usr/local/lib/plex-postgresql/docker-entrypoint.sh" > /etc/s6-overlay/s6-rc.d/init-plex-postgresql/up && \
+    chmod +x /etc/s6-overlay/s6-rc.d/init-plex-postgresql/up && \
+    mkdir -p /etc/s6-overlay/s6-rc.d/user/contents.d && \
+    touch /etc/s6-overlay/s6-rc.d/user/contents.d/init-plex-postgresql
