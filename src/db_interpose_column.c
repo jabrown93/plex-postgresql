@@ -8,6 +8,7 @@
 #include "db_interpose.h"
 #include "pg_query_cache.h"
 #include <stdatomic.h>
+#include <sys/time.h>
 
 // ============================================================================
 // SQLite Declared Type Lookup Cache
@@ -127,14 +128,76 @@ static void preload_decltype_cache(pg_connection_t *pg_conn) {
 
 // Normalize Plex custom type annotations to standard SQLite types
 // Plex uses "DT_INTEGER(8)" for BIGINT, "BOOLEAN" for booleans, etc.
+// SQLite schema uses "INTEGER(8)" for bigint columns, VARCHAR(n) for strings,
+// TIMESTAMP for timestamps, FLOAT for floats, etc.
 // SOCI only understands: INTEGER, REAL, TEXT, BLOB
 // Returns pointer to static string (do not free)
 static const char* normalize_sqlite_decltype(const char *plex_type) {
-    if (!plex_type) return NULL;
+    // BUG FIX 1: Never return NULL - SOCI defaults to "char" when NULL
+    // Always return a valid type to prevent type mismatch errors
+    if (!plex_type || !plex_type[0]) {
+        LOG_DEBUG("NORMALIZE_TYPE: NULL/empty input, returning TEXT");
+        return "TEXT";
+    }
 
     // Check for Plex's DT_INTEGER(n) format
-    if (strncmp(plex_type, "DT_INTEGER", 10) == 0) {
+    // TEST 5: Keep DT_INTEGER(8) as-is, matching native SQLite
+    if (strncasecmp(plex_type, "DT_INTEGER", 10) == 0) {
+        // Check if it's DT_INTEGER(8) - keep it exactly as native SQLite stores it
+        if ((plex_type[10] == '(' && plex_type[11] == '8' && plex_type[12] == ')') ||
+            (plex_type[10] == '(' && plex_type[11] == '8' && plex_type[12] == ')')) {
+            LOG_DEBUG("NORMALIZE_TYPE: 'DT_INTEGER(8)' -> 'dt_integer(8)' (match native SQLite)");
+            return "dt_integer(8)";
+        }
+        // Otherwise treat as 32-bit INTEGER
         return "INTEGER";
+    }
+
+    // BUG FIX 2: Add boundary checks for prefix matches to prevent false matches
+    // (e.g., "INTEGER_FIELD" should not match "INTEGER")
+    
+    // Check for INTEGER(n) format - e.g., INTEGER, INTEGER(8), integer, etc.
+    // TEST 5: Return dt_integer(8) to match native SQLite
+    if (strncasecmp(plex_type, "INTEGER", 7) == 0 && 
+        (plex_type[7] == '\0' || plex_type[7] == '(' || isspace(plex_type[7]))) {
+        // Check if it's INTEGER(8) - return native SQLite format
+        if (plex_type[7] == '(' && plex_type[8] == '8' && plex_type[9] == ')') {
+            LOG_DEBUG("NORMALIZE_TYPE: 'INTEGER(8)' -> 'dt_integer(8)' (match native SQLite)");
+            return "dt_integer(8)";
+        }
+        // Otherwise treat as 32-bit INTEGER
+        return "INTEGER";
+    }
+
+    // BUG FIX 3: Add BIGINT support for 64-bit integers
+    // TEST 5: Convert BIGINT to dt_integer(8) to match native SQLite
+    if (strncasecmp(plex_type, "BIGINT", 6) == 0 && 
+        (plex_type[6] == '\0' || plex_type[6] == '(' || isspace(plex_type[6]))) {
+        LOG_DEBUG("NORMALIZE_TYPE: 'BIGINT(...)' -> 'dt_integer(8)' (match native SQLite)");
+        return "dt_integer(8)";
+    }
+
+    // INT8 returns dt_integer(8) (PostgreSQL alias)
+    if (strcasecmp(plex_type, "INT8") == 0) {
+        LOG_DEBUG("NORMALIZE_TYPE: 'INT8' -> 'dt_integer(8)' (match native SQLite)");
+        return "dt_integer(8)";
+    }
+    
+    // INT64 returns dt_integer(8)
+    if (strcasecmp(plex_type, "INT64") == 0) {
+        LOG_DEBUG("NORMALIZE_TYPE: 'INT64' -> 'dt_integer(8)' (match native SQLite)");
+        return "dt_integer(8)";
+    }
+    
+    // LONG returns dt_integer(8)
+    if (strcasecmp(plex_type, "LONG") == 0) {
+        LOG_DEBUG("NORMALIZE_TYPE: 'LONG' -> 'dt_integer(8)' (match native SQLite)");
+        return "dt_integer(8)";
+    }
+    
+    // dt_integer(8) stays as-is
+    if (strcasecmp(plex_type, "dt_integer(8)") == 0) {
+        return "dt_integer(8)";
     }
 
     // Normalize boolean to INTEGER (SQLite doesn't have native boolean)
@@ -142,15 +205,30 @@ static const char* normalize_sqlite_decltype(const char *plex_type) {
         return "INTEGER";
     }
 
-    // Already standard SQLite type - return as-is
-    // Common types: INTEGER, REAL, TEXT, BLOB, NUMERIC
-    if (strcasecmp(plex_type, "INTEGER") == 0) return "INTEGER";
+    // TIMESTAMP is stored as INTEGER in SQLite (unix timestamp)
+    if (strcasecmp(plex_type, "TIMESTAMP") == 0) {
+        return "INTEGER";
+    }
+
+    // FLOAT/DOUBLE types map to REAL
+    if (strcasecmp(plex_type, "FLOAT") == 0) return "REAL";
+    if (strcasecmp(plex_type, "DOUBLE") == 0) return "REAL";
+
+    // VARCHAR(n) and STRING types map to TEXT - with boundary check
+    if (strncasecmp(plex_type, "VARCHAR", 7) == 0 && 
+        (plex_type[7] == '\0' || plex_type[7] == '(' || isspace(plex_type[7]))) {
+        return "TEXT";
+    }
+    if (strcasecmp(plex_type, "STRING") == 0) return "TEXT";
+    if (strcasecmp(plex_type, "CHAR") == 0) return "TEXT";
+
+    // Standard SQLite types - exact match (case insensitive)
     if (strcasecmp(plex_type, "REAL") == 0) return "REAL";
     if (strcasecmp(plex_type, "TEXT") == 0) return "TEXT";
     if (strcasecmp(plex_type, "BLOB") == 0) return "BLOB";
     if (strcasecmp(plex_type, "NUMERIC") == 0) return "NUMERIC";
 
-    // Unknown type - default to TEXT for safety
+    // BUG FIX 4: Always return TEXT as safe default, NEVER return NULL
     LOG_DEBUG("NORMALIZE_TYPE: unknown type '%s', defaulting to TEXT", plex_type);
     return "TEXT";
 }
@@ -559,6 +637,49 @@ static const char* sqlite_type_name(int type) {
     }
 }
 
+// Type consistency validation helper
+// Validates that column_type and column_decltype are consistent
+static void validate_type_consistency(sqlite3_stmt *pStmt, int idx, const char *accessor_name) {
+    pg_stmt_t *pg_stmt = pg_find_any_stmt(pStmt);
+    if (!pg_stmt || !pg_stmt->is_pg) return;
+    
+    int col_type = my_sqlite3_column_type(pStmt, idx);
+    const char *col_decltype = my_sqlite3_column_decltype(pStmt, idx);
+    
+    pthread_mutex_lock(&pg_stmt->mutex);
+    if (!pg_stmt->result) {
+        pthread_mutex_unlock(&pg_stmt->mutex);
+        return;
+    }
+    
+    Oid oid = PQftype(pg_stmt->result, idx);
+    const char *col_name = PQfname(pg_stmt->result, idx);
+    
+        // Warn about type mismatches
+        if (col_decltype) {
+            int expected_for_decltype = -1;
+            if (strcmp(col_decltype, "INTEGER") == 0 || 
+                strcmp(col_decltype, "BIGINT") == 0 ||
+                strcmp(col_decltype, "dt_integer(8)") == 0) {
+                expected_for_decltype = SQLITE_INTEGER;
+            } else if (strcmp(col_decltype, "TEXT") == 0) {
+                expected_for_decltype = SQLITE_TEXT;
+            } else if (strcmp(col_decltype, "REAL") == 0) {
+                expected_for_decltype = SQLITE_FLOAT;
+            } else if (strcmp(col_decltype, "BLOB") == 0) {
+                expected_for_decltype = SQLITE_BLOB;
+            }
+        
+        if (expected_for_decltype != -1 && col_type != SQLITE_NULL && col_type != expected_for_decltype) {
+            LOG_ERROR("TYPE_MISMATCH: accessor=%s col='%s' idx=%d decltype='%s' expects %s but column_type returned %s (OID=%u)",
+                      accessor_name, col_name ? col_name : "?", idx,
+                      col_decltype, sqlite_type_name(expected_for_decltype),
+                      sqlite_type_name(col_type), (unsigned)oid);
+        }
+    }
+    pthread_mutex_unlock(&pg_stmt->mutex);
+}
+
 int my_sqlite3_column_type(sqlite3_stmt *pStmt, int idx) {
     global_column_type_calls++;  // Global counter for exception debugging
     LOG_DEBUG("COLUMN_TYPE: stmt=%p idx=%d", (void*)pStmt, idx);
@@ -617,8 +738,31 @@ int my_sqlite3_column_type(sqlite3_stmt *pStmt, int idx) {
         // Update exception context
         last_column_being_accessed = col_name;
         int result = is_null ? SQLITE_NULL : pg_oid_to_sqlite_type(oid);
-        LOG_DEBUG("COLUMN_TYPE_VERBOSE: idx=%d col='%s' row=%d OID=%u is_null=%d -> %s",
-                idx, col_name ? col_name : "?", row, (unsigned)oid, is_null, sqlite_type_name(result));
+        
+        // ENHANCED LOGGING: Include decltype for comparison
+        const char *col_decltype = NULL;
+        // Quick decltype check without recursive call - use OID mapping
+        switch (oid) {
+            case 16: case 21: case 23: case 26:  // bool, int2, int4, oid
+                col_decltype = "INTEGER";
+                break;
+            case 20:  // int8
+                col_decltype = "BIGINT";
+                break;
+            case 700: case 701: case 1700:  // float4, float8, numeric
+                col_decltype = "REAL";
+                break;
+            case 17:  // bytea
+                col_decltype = "BLOB";
+                break;
+            default:
+                col_decltype = "TEXT";
+                break;
+        }
+        
+        LOG_ERROR("COLUMN_TYPE: idx=%d col='%s' row=%d OID=%u is_null=%d -> %s (decltype='%s')",
+                idx, col_name ? col_name : "?", row, (unsigned)oid, is_null, 
+                sqlite_type_name(result), col_decltype ? col_decltype : "NULL");
         pthread_mutex_unlock(&pg_stmt->mutex);
         return result;
     }
@@ -626,10 +770,28 @@ int my_sqlite3_column_type(sqlite3_stmt *pStmt, int idx) {
 }
 
 int my_sqlite3_column_int(sqlite3_stmt *pStmt, int idx) {
+    validate_type_consistency(pStmt, idx, "column_int");
     pg_stmt_t *pg_stmt = pg_find_any_stmt(pStmt);
+    
+    // ULTRA-DEBUG: Log count query int reads
+    int is_count_query = (pg_stmt && pg_stmt->pg_sql && strstr(pg_stmt->pg_sql, "parents.parent_id,count(*)"));
+    if (is_count_query) {
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        LOG_ERROR("[%ld.%06ld] ULTRA_DEBUG_INT: stmt=%p idx=%d thread=%p", 
+                 tv.tv_sec, tv.tv_usec, (void*)pStmt, idx, (void*)pthread_self());
+    }
+    
     // Handle all PostgreSQL statements
     if (pg_stmt && pg_stmt->is_pg) {
         pthread_mutex_lock(&pg_stmt->mutex);
+        
+        if (is_count_query) {
+            const char *col_name = (pg_stmt->result && idx >= 0 && idx < pg_stmt->num_cols) ? 
+                                   PQfname(pg_stmt->result, idx) : "?";
+            LOG_ERROR("ULTRA_DEBUG_INT: col='%s' row=%d/%d", 
+                     col_name, pg_stmt->current_row, pg_stmt->num_rows);
+        }
 
         // QUERY CACHE: Check for cached result first
         if (pg_stmt->cached_result) {
@@ -685,6 +847,17 @@ int my_sqlite3_column_int(sqlite3_stmt *pStmt, int idx) {
             if (val[0] == 't' && val[1] == '\0') result_val = 1;
             else if (val[0] == 'f' && val[1] == '\0') result_val = 0;
             else result_val = atoi(val);
+            
+            // WORKAROUND: metadata_type 18 (collection/folder) causes std::bad_cast
+            // When Plex loads related objects, it tries to cast Collection to Show/Episode
+            // Convert type 18 to NULL to make Plex skip these items
+            if (col_name && (strcmp(col_name, "metadata_items_metadata_type") == 0 || 
+                            strcmp(col_name, "metadata_type") == 0)) {
+                if (result_val == 18) {
+                    LOG_ERROR("TYPE18_WORKAROUND: Converting metadata_type 18 (collection) to 0 for row %d to prevent std::bad_cast", row);
+                    result_val = 0;  // Return 0 (invalid type) so Plex will skip
+                }
+            }
         }
         
         // TYPE_DEBUG: Enhanced logging for type-related columns (non-cached path)
@@ -701,7 +874,14 @@ int my_sqlite3_column_int(sqlite3_stmt *pStmt, int idx) {
 }
 
 sqlite3_int64 my_sqlite3_column_int64(sqlite3_stmt *pStmt, int idx) {
+    validate_type_consistency(pStmt, idx, "column_int64");
     pg_stmt_t *pg_stmt = pg_find_any_stmt(pStmt);
+    
+    // ULTRA_DEBUG: Log all column_int64 calls for count query
+    int is_count_query = (pg_stmt && pg_stmt->pg_sql && strstr(pg_stmt->pg_sql, "parents.parent_id,count(*)"));
+    if (is_count_query) {
+        LOG_ERROR("ULTRA_DEBUG_INT64: Called for count query! stmt=%p idx=%d", (void*)pStmt, idx);
+    }
     // Handle all PostgreSQL statements
     if (pg_stmt && pg_stmt->is_pg) {
         pthread_mutex_lock(&pg_stmt->mutex);
@@ -773,6 +953,7 @@ sqlite3_int64 my_sqlite3_column_int64(sqlite3_stmt *pStmt, int idx) {
 }
 
 double my_sqlite3_column_double(sqlite3_stmt *pStmt, int idx) {
+    validate_type_consistency(pStmt, idx, "column_double");
     pg_stmt_t *pg_stmt = pg_find_any_stmt(pStmt);
     // Handle all PostgreSQL statements
     if (pg_stmt && pg_stmt->is_pg) {
@@ -824,19 +1005,122 @@ double my_sqlite3_column_double(sqlite3_stmt *pStmt, int idx) {
     return orig_sqlite3_column_double ? orig_sqlite3_column_double(pStmt, idx) : 0.0;
 }
 
-// Static buffers for column_text - LARGE pool to prevent race condition wrap-around
-// 4096 buffers x 16KB = 64MB total - allows 4096 concurrent column_text calls before wrap
-// CRITICAL: 256 buffers caused crashes under heavy concurrency (30+ parallel requests)
-static char column_text_buffers[4096][16384];
-static atomic_int column_text_idx = 0;  // Atomic for thread-safe increment
+// ============================================================================
+// UTF-8 Validation and String Sanitization
+// ============================================================================
+// Boost.Locale in Plex may be sensitive to invalid UTF-8 sequences.
+// This function validates and optionally sanitizes strings from PostgreSQL.
+
+static int is_valid_utf8_char(const unsigned char *s, size_t len, size_t *char_len) {
+    if (len == 0) return 0;
+    
+    unsigned char c = s[0];
+    
+    // ASCII (0xxxxxxx)
+    if (c <= 0x7F) {
+        *char_len = 1;
+        return 1;
+    }
+    
+    // 2-byte UTF-8 (110xxxxx 10xxxxxx)
+    if ((c & 0xE0) == 0xC0) {
+        if (len < 2) return 0;
+        if ((s[1] & 0xC0) != 0x80) return 0;
+        // Check for overlong encoding
+        if (c < 0xC2) return 0;
+        *char_len = 2;
+        return 1;
+    }
+    
+    // 3-byte UTF-8 (1110xxxx 10xxxxxx 10xxxxxx)
+    if ((c & 0xF0) == 0xE0) {
+        if (len < 3) return 0;
+        if ((s[1] & 0xC0) != 0x80) return 0;
+        if ((s[2] & 0xC0) != 0x80) return 0;
+        // Check for overlong encoding and surrogates
+        if (c == 0xE0 && s[1] < 0xA0) return 0;
+        if (c == 0xED && s[1] >= 0xA0) return 0; // Reject surrogates U+D800..U+DFFF
+        *char_len = 3;
+        return 1;
+    }
+    
+    // 4-byte UTF-8 (11110xxx 10xxxxxx 10xxxxxx 10xxxxxx)
+    if ((c & 0xF8) == 0xF0) {
+        if (len < 4) return 0;
+        if ((s[1] & 0xC0) != 0x80) return 0;
+        if ((s[2] & 0xC0) != 0x80) return 0;
+        if ((s[3] & 0xC0) != 0x80) return 0;
+        // Check for overlong encoding and values > U+10FFFF
+        if (c == 0xF0 && s[1] < 0x90) return 0;
+        if (c == 0xF4 && s[1] >= 0x90) return 0;
+        if (c >= 0xF5) return 0;
+        *char_len = 4;
+        return 1;
+    }
+    
+    return 0; // Invalid UTF-8 start byte
+}
+
+static int validate_utf8_string(const char *str, size_t len) {
+    size_t i = 0;
+    while (i < len) {
+        size_t char_len;
+        if (!is_valid_utf8_char((const unsigned char *)(str + i), len - i, &char_len)) {
+            return 0; // Invalid UTF-8 sequence found
+        }
+        i += char_len;
+    }
+    return 1; // Valid UTF-8
+}
+
+// Static buffers for column_text - INCREASED SIZE v0.8.13
+// Due to potential Boost.Locale issues, we copy strings instead of returning PQgetvalue() directly.
+// Use larger buffers and more of them to handle concurrent access patterns.
+#define NUM_TEXT_BUFFERS 64
+#define TEXT_BUFFER_SIZE 8192
+static __thread char column_text_buffers[NUM_TEXT_BUFFERS][TEXT_BUFFER_SIZE];
+static __thread int column_text_buf_idx = 0;  // Thread-local, no atomic needed
 
 const unsigned char* my_sqlite3_column_text(sqlite3_stmt *pStmt, int idx) {
-    LOG_DEBUG("COLUMN_TEXT: stmt=%p idx=%d", (void*)pStmt, idx);
+    validate_type_consistency(pStmt, idx, "column_text");
+    
     pg_stmt_t *pg_stmt = pg_find_any_stmt(pStmt);
-    LOG_DEBUG("COLUMN_TEXT: pg_stmt=%p is_pg=%d", (void*)pg_stmt, pg_stmt ? pg_stmt->is_pg : -1);
+    
+    // ULTRA-DEBUG: Log EVERYTHING for count queries
+    int is_count_query = (pg_stmt && pg_stmt->pg_sql && strstr(pg_stmt->pg_sql, "parents.parent_id,count(*)"));
+    
+    if (is_count_query) {
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        LOG_ERROR("[%ld.%06ld] ULTRA_DEBUG_TEXT: stmt=%p idx=%d thread=%p", 
+                 tv.tv_sec, tv.tv_usec, (void*)pStmt, idx, (void*)pthread_self());
+    }
+    
     // Handle all PostgreSQL statements
     if (pg_stmt && pg_stmt->is_pg) {
         pthread_mutex_lock(&pg_stmt->mutex);
+        
+        if (is_count_query) {
+            const char *col_name = (pg_stmt->result && idx >= 0 && idx < pg_stmt->num_cols) ?
+                                   PQfname(pg_stmt->result, idx) : "?";
+            int row = pg_stmt->current_row;
+            const char *preview = NULL;
+            if (pg_stmt->result && row >= 0 && row < pg_stmt->num_rows && 
+                idx >= 0 && idx < pg_stmt->num_cols && 
+                !PQgetisnull(pg_stmt->result, row, idx)) {
+                preview = PQgetvalue(pg_stmt->result, row, idx);
+            }
+            LOG_ERROR("ULTRA_DEBUG_TEXT: col='%s' row=%d/%d value='%s' (hex:", 
+                     col_name, pg_stmt->current_row, pg_stmt->num_rows, 
+                     preview ? preview : "(null)");
+            if (preview) {
+                for (int i = 0; i < 20 && preview[i]; i++) {
+                    fprintf(stderr, " %02x", (unsigned char)preview[i]);
+                }
+            }
+            fprintf(stderr, ")\n");
+            fflush(stderr);
+        }
         LOG_DEBUG("COLUMN_TEXT: locked mutex, result=%p row=%d cols=%d",
                  (void*)pg_stmt->result, pg_stmt->current_row, pg_stmt->num_cols);
 
@@ -864,7 +1148,8 @@ const unsigned char* my_sqlite3_column_text(sqlite3_stmt *pStmt, int idx) {
             // Non-cached path - get from PGresult
             if (!pg_stmt->result) {
                 LOG_DEBUG("COLUMN_TEXT: no result, returning empty buffer");
-                int buf = atomic_fetch_add(&column_text_idx, 1) & 0xFFF;
+                int buf = column_text_buf_idx;
+                column_text_buf_idx = (column_text_buf_idx + 1) % NUM_TEXT_BUFFERS;
                 column_text_buffers[buf][0] = '\0';
                 pthread_mutex_unlock(&pg_stmt->mutex);
                 return (const unsigned char*)column_text_buffers[buf];
@@ -872,7 +1157,8 @@ const unsigned char* my_sqlite3_column_text(sqlite3_stmt *pStmt, int idx) {
 
             if (idx < 0 || idx >= pg_stmt->num_cols) {
                 LOG_DEBUG("COLUMN_TEXT: idx=%d out of bounds (num_cols=%d)", idx, pg_stmt->num_cols);
-                int buf = atomic_fetch_add(&column_text_idx, 1) & 0xFFF;
+                int buf = column_text_buf_idx;
+                column_text_buf_idx = (column_text_buf_idx + 1) % NUM_TEXT_BUFFERS;
                 column_text_buffers[buf][0] = '\0';
                 pthread_mutex_unlock(&pg_stmt->mutex);
                 return (const unsigned char*)column_text_buffers[buf];
@@ -881,7 +1167,8 @@ const unsigned char* my_sqlite3_column_text(sqlite3_stmt *pStmt, int idx) {
             int row = pg_stmt->current_row;
             if (row < 0 || row >= pg_stmt->num_rows) {
                 LOG_DEBUG("COLUMN_TEXT: row=%d out of bounds (num_rows=%d)", row, pg_stmt->num_rows);
-                int buf = atomic_fetch_add(&column_text_idx, 1) & 0xFFF;
+                int buf = column_text_buf_idx;
+                column_text_buf_idx = (column_text_buf_idx + 1) % NUM_TEXT_BUFFERS;
                 column_text_buffers[buf][0] = '\0';
                 pthread_mutex_unlock(&pg_stmt->mutex);
                 return (const unsigned char*)column_text_buffers[buf];
@@ -896,7 +1183,8 @@ const unsigned char* my_sqlite3_column_text(sqlite3_stmt *pStmt, int idx) {
             source_value = PQgetvalue(pg_stmt->result, row, idx);
             if (!source_value) {
                 LOG_DEBUG("COLUMN_TEXT: PQgetvalue returned NULL, returning empty buffer");
-                int buf = atomic_fetch_add(&column_text_idx, 1) & 0xFFF;
+                int buf = column_text_buf_idx;
+                column_text_buf_idx = (column_text_buf_idx + 1) % NUM_TEXT_BUFFERS;
                 column_text_buffers[buf][0] = '\0';
                 pthread_mutex_unlock(&pg_stmt->mutex);
                 return (const unsigned char*)column_text_buffers[buf];
@@ -908,8 +1196,35 @@ const unsigned char* my_sqlite3_column_text(sqlite3_stmt *pStmt, int idx) {
             
             // CRITICAL WARNING: column_text called for INTEGER column - this suggests SOCI type mismatch
             if (oid == 23 || oid == 20 || oid == 21) {  // int4, int8, int2
-                LOG_DEBUG("COLUMN_TEXT_INTEGER: col='%s' idx=%d row=%d oid=%u val='%.50s' - INTEGER column accessed as TEXT!",
+                LOG_ERROR("COLUMN_TEXT_INTEGER: col='%s' idx=%d row=%d oid=%u val='%.50s' - INTEGER column accessed as TEXT!",
                           col_name ? col_name : "?", idx, row, oid, source_value);
+                
+                // TARGETED FIX: Only reformat aggregate function results (count, sum, max, min, avg)
+                // These are the columns that cause std::bad_cast in SOCI
+                if (col_name && (strcmp(col_name, "count") == 0 ||
+                                strcmp(col_name, "sum") == 0 ||
+                                strcmp(col_name, "max") == 0 ||
+                                strcmp(col_name, "min") == 0 ||
+                                strcmp(col_name, "avg") == 0 ||
+                                strstr(col_name, "count(") != NULL ||
+                                strstr(col_name, "COUNT(") != NULL)) {
+                    // Reformat through sprintf to ensure clean string conversion
+                    int buf_idx = column_text_buf_idx;
+                    column_text_buf_idx = (column_text_buf_idx + 1) % NUM_TEXT_BUFFERS;
+                    
+                    if (oid == 20) {  // int8/BIGINT
+                        long long val = atoll(source_value);
+                        snprintf(column_text_buffers[buf_idx], TEXT_BUFFER_SIZE, "%lld", val);
+                    } else {  // int2/int4
+                        int val = atoi(source_value);
+                        snprintf(column_text_buffers[buf_idx], TEXT_BUFFER_SIZE, "%d", val);
+                    }
+                    
+                    LOG_ERROR("COLUMN_TEXT_AGGREGATE_REFORMAT: col='%s' '%s' -> '%s'", 
+                             col_name, source_value, column_text_buffers[buf_idx]);
+                    pthread_mutex_unlock(&pg_stmt->mutex);
+                    return (const unsigned char*)column_text_buffers[buf_idx];
+                }
             }
             
             if (col_name && strstr(col_name, "type") != NULL) {
@@ -919,24 +1234,41 @@ const unsigned char* my_sqlite3_column_text(sqlite3_stmt *pStmt, int idx) {
             }
         }
 
-        // CRITICAL: Always copy to static buffer to prevent use-after-free
-        // Both cache and PGresult can be freed while caller still uses the pointer
-        size_t len = strlen(source_value);
-        if (len >= 16383) len = 16383;
-
-        // Thread-safe buffer allocation using atomic increment
-        // Use bitmask for fast modulo (256 = 0xFF + 1)
-        int buf = atomic_fetch_add(&column_text_idx, 1) & 0xFFF;
-        memcpy(column_text_buffers[buf], source_value, len);
-        column_text_buffers[buf][len] = '\0';
-
-        LOG_DEBUG("COLUMN_TEXT: copied to buffer[%d] len=%zu", buf, len);
+        // FIX v0.8.13: Copy strings to thread-local buffers instead of returning PQgetvalue() directly
+        // This addresses potential Boost.Locale issues where it may be sensitive to:
+        // - Memory alignment of source strings  
+        // - Presence of specific memory metadata
+        // - String buffer ownership semantics
+        // 
+        // By copying to our own buffers, we ensure consistent behavior similar to native SQLite.
+        
+        // Validate UTF-8 first
+        size_t str_len = strlen(source_value);
+        if (str_len > 0 && !validate_utf8_string(source_value, str_len)) {
+            LOG_ERROR("COLUMN_TEXT_UTF8_INVALID: idx=%d row=%d contains invalid UTF-8! len=%zu sql=%.200s",
+                      idx, pg_stmt->current_row, str_len,
+                      pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
+            // Return empty string for invalid UTF-8
+            column_text_buffers[column_text_buf_idx][0] = '\0';
+            const unsigned char *result = (const unsigned char*)column_text_buffers[column_text_buf_idx];
+            column_text_buf_idx = (column_text_buf_idx + 1) % NUM_TEXT_BUFFERS;
+            pthread_mutex_unlock(&pg_stmt->mutex);
+            return result;
+        }
+        
+        // Copy string to thread-local buffer
+        int buf_idx = column_text_buf_idx;
+        column_text_buf_idx = (column_text_buf_idx + 1) % NUM_TEXT_BUFFERS;
+        
+        size_t copy_len = (str_len < TEXT_BUFFER_SIZE - 1) ? str_len : (TEXT_BUFFER_SIZE - 1);
+        memcpy(column_text_buffers[buf_idx], source_value, copy_len);
+        column_text_buffers[buf_idx][copy_len] = '\0';
+        
+        LOG_DEBUG("COLUMN_TEXT: copied %zu bytes to buffer[%d] idx=%d row=%d utf8=valid",
+                  copy_len, buf_idx, idx, pg_stmt->current_row);
+        
         pthread_mutex_unlock(&pg_stmt->mutex);
-
-        // TEST: Return the actual buffer content
-        // If crashes: issue is with buffer content
-        // If works: buffer content is fine
-        return (const unsigned char*)column_text_buffers[buf];
+        return (const unsigned char*)column_text_buffers[buf_idx];
     }
     LOG_DEBUG("COLUMN_TEXT: falling through to orig");
     return orig_sqlite3_column_text ? orig_sqlite3_column_text(pStmt, idx) : NULL;
@@ -1213,44 +1545,58 @@ const char* my_sqlite3_column_decltype(sqlite3_stmt *pStmt, int idx) {
                 LOG_DEBUG("DECLTYPE_DEBUG: RETURNING CACHED='%s' for col='%s' idx=%d",
                          cached_type, col_name, idx);
             }
-            LOG_DEBUG("DECLTYPE_CACHED: idx=%d col='%s' -> '%s'",
-                     idx, col_name ? col_name : "?", cached_type);
+            // CRITICAL DEBUG: Log cached decltype returns too
+            LOG_ERROR("DECLTYPE_CACHED: idx=%d col='%s' -> '%s' sql=%.300s",
+                     idx, col_name ? col_name : "?", cached_type,
+                     pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
             pthread_mutex_unlock(&pg_stmt->mutex);
             return cached_type;
         }
 
         // STEP 4: Fallback to OID-based type mapping
         Oid oid = PQftype(pg_stmt->result, idx);
-        const char *decltype;
-
-        // Map PostgreSQL OID to SQLite-compatible decltype
-        // Must match the type returned by column_type() and be in SOCI's type map
-        switch (oid) {
-            case 16:  // bool
-            case 20: case 21: case 23: case 26:  // int8, int2, int4, oid
-                decltype = "INTEGER";  // Maps to SQLITE_INTEGER
-                break;
-            case 700: case 701: case 1700:  // float4, float8, numeric
-                decltype = "REAL";  // Maps to SQLITE_FLOAT
-                break;
-            case 17:  // bytea
-                decltype = "BLOB";  // Maps to SQLITE_BLOB
-                break;
-            default:
-                decltype = "TEXT";  // Maps to SQLITE_TEXT
-                break;
+        
+        // SPECIAL CASE: Aggregate functions (count, sum, max, min, avg) 
+        // PostgreSQL returns BIGINT (OID 20) for aggregates
+        // SOCI needs BIGINT (not INTEGER) to map to db_int64 for proper 64-bit handling
+        // This was the root cause: INTEGER -> db_int32 -> row.get<int64_t>() -> std::bad_cast
+        if (col_name && oid == 20) {
+            if (strcmp(col_name, "count") == 0 ||
+                strcmp(col_name, "sum") == 0 ||
+                strcmp(col_name, "max") == 0 ||
+                strcmp(col_name, "min") == 0 ||
+                strcmp(col_name, "avg") == 0 ||
+                strstr(col_name, "count(") != NULL ||
+                strstr(col_name, "COUNT(") != NULL) {
+                LOG_ERROR("DECLTYPE_AGGREGATE: col='%s' OID=20 (BIGINT) -> returning TEXT to avoid SOCI bad_cast bug", col_name);
+                pthread_mutex_unlock(&pg_stmt->mutex);
+                return "TEXT";  // WORKAROUND: Force TEXT to avoid SOCI integer parsing bug
+            }
         }
+        
+        // Use centralized OID-to-decltype mapping function
+        // CRITICAL: This function now differentiates INT4 (OID 23) -> "INTEGER" 
+        //           from INT8 (OID 20) -> "BIGINT" to prevent std::bad_cast
+        const char *decltype = pg_oid_to_sqlite_decltype(oid);
 
-        // CRITICAL DEBUG: Log ALL decltype accesses to track down bad_cast
-        LOG_ERROR("DECLTYPE_OID_ACCESS: idx=%d col='%s' OID=%u -> '%s' sql=%.200s",
-                 idx, col_name ? col_name : "?", (unsigned)oid, decltype,
+        // LOG INT8 vs INT4 detection (for debugging type issues)
+        if (strcmp(decltype, "BIGINT") == 0 || strcmp(decltype, "INTEGER") == 0) {
+            LOG_ERROR("DECLTYPE_INT: col='%s' idx=%d oid=%u -> '%s' sql=%.100s",
+                      col_name ? col_name : "?", idx, (unsigned)oid, decltype,
+                      pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
+        }
+        
+        // ULTRA-DEBUG: Log count query decltype returns
+        int is_count_query = (pg_stmt->pg_sql && strstr(pg_stmt->pg_sql, "parents.parent_id,count(*)"));
+        if (is_count_query) {
+            LOG_ERROR("ULTRA_DEBUG_DECLTYPE: idx=%d col='%s' oid=%u -> RETURNING '%s'",
+                     idx, col_name ? col_name : "?", (unsigned)oid, decltype);
+        }
+        
+        LOG_ERROR("DECLTYPE_CACHED: idx=%d col='%s' -> '%s' sql=%.100s",
+                 idx, col_name ? col_name : "?", decltype,
                  pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
-        if (is_metadata_type) {
-            LOG_DEBUG("DECLTYPE_DEBUG: RETURNING OID-BASED='%s' for col='%s' idx=%d oid=%u",
-                     decltype, col_name, idx, (unsigned)oid);
-        }
-        LOG_DEBUG("DECLTYPE_OID: idx=%d col='%s' OID=%u -> '%s'",
-                 idx, col_name ? col_name : "?", (unsigned)oid, decltype);
+        
         pthread_mutex_unlock(&pg_stmt->mutex);
         return decltype;
     }

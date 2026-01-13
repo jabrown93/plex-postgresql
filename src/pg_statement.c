@@ -636,11 +636,16 @@ const char* pg_oid_to_sqlite_decltype(Oid oid) {
         case 16:   // BOOL
             return "INTEGER";  // SQLite has no BOOL, use INTEGER
         case 20:   // INT8 (bigint)
-            return "INTEGER";
+            // CRITICAL FIX v2: Return BIGINT instead of INTEGER
+            // Root cause: SOCI maps "INTEGER" -> db_int32 (32-bit), but PostgreSQL BIGINT is 64-bit
+            // When Plex calls row.get<int64_t>(), SOCI tries to cast int32 -> int64 -> std::bad_cast
+            // Solution: "BIGINT" -> SOCI maps to db_int64 -> calls column_int64() -> correct 64-bit handling
+            // See: SOCI Issue #1190, Agent 2 analysis in supernerdanalyse.md
+            return "BIGINT";
         case 21:   // INT2 (smallint)
-            return "INTEGER";
+            return "INTEGER";  // Keep as INTEGER for SOCI compatibility
         case 23:   // INT4 (integer)
-            return "INTEGER";
+            return "INTEGER";  // Standard 32-bit integer
         case 700:  // FLOAT4
             return "REAL";
         case 701:  // FLOAT8

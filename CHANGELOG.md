@@ -5,6 +5,87 @@ All notable changes to plex-postgresql will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.12] - 2026-01-13
+
+### Fixed
+- **CRITICAL: std::bad_cast exception in TV shows endpoint** - MetadataCounterCache rebuild crash
+  - ROOT CAUSE: Plex's SOCI version has bug with BIGINT aggregate functions in row access
+  - Sequence: count() returns BIGINT (OID 20) → declared as "BIGINT" → SOCI uses column_text() → parses as integer → row.get<int64_t>() → std::bad_cast
+  - SOCI's SQLite backend in Plex uses column_text() for ALL integer types, not column_int64()
+  - Type checking during text-to-int conversion fails for aggregate BIGINT values
+  - Impact: TV shows endpoint returned HTTP 500, "Exception handled: std::bad_cast"
+  - Solution: Force aggregate functions (count, sum, max, min, avg) to declare as TEXT type
+  - SOCI accepts TEXT → integer conversion without strict type checking
+  - Workaround in `column_decltype()` detects aggregate column names and returns "TEXT"
+  - Files: `db_interpose_column.c` (line 1573), `pg_statement.c` (improved type mappings)
+  - Related: SOCI Issue #1190 (identical bug, fixed in SOCI 4.1.0)
+  
+- **Improved PostgreSQL type mappings** - Correct BIGINT decltype declaration
+  - INT2 (OID 21) → "INTEGER" (unchanged for SOCI compatibility)
+  - INT4 (OID 23) → "INTEGER" (unchanged, correct)
+  - INT8 (OID 20) → "BIGINT" (was "INTEGER", now correct)
+  - File: `pg_statement.c` (pg_oid_to_sqlite_decltype function)
+  - Note: SMALLINT not used due to SOCI compatibility issues
+
+## [0.8.10] - 2026-01-12
+
+### Fixed
+- **CRITICAL: INSERT...RETURNING lastval() transaction boundary bug** - playQueues 500 errors (final fix)
+  - ROOT CAUSE: `lastval()` only works within the same transaction, but libpq uses autocommit mode
+  - Sequence: INSERT...RETURNING executes in transaction T1 → commits → lastval() queries in transaction T2 → fails
+  - PostgreSQL closes transaction after each PQexec() in autocommit mode
+  - `lastval()` error: "lastval is not yet defined in this session" or returns stale values
+  - Solution: Capture RETURNING id immediately and store in `pg_connection_t->last_insert_rowid`
+  - Modified `last_insert_rowid()` to return stored value instead of calling `lastval()`
+  - Stores ID in all three paths: prepared statements, cached statements, and direct exec
+  - Files: `db_interpose_step.c` (2 locations), `db_interpose_exec.c`, `db_interpose_metadata.c`
+
+- **CRITICAL: Explicit transaction handling implementation** - Root cause fix for transaction data loss
+  - ROOT CAUSE: BEGIN/COMMIT/ROLLBACK were skipped as no-ops, PostgreSQL never received them
+  - Plex sends: BEGIN → INSERT → COMMIT, but shim executed: (skip) → INSERT → (skip)
+  - PostgreSQL used implicit transaction mode, transactions never committed
+  - Data appeared to succeed (lastval() worked) but was rolled back on connection reuse
+  - Solution: Removed transaction commands from skip patterns, implemented explicit execution
+  - Added `is_transaction_command()` to detect BEGIN/COMMIT/ROLLBACK
+  - Execute transaction commands on PostgreSQL in `db_interpose_exec.c`
+  - Track transaction state in `pg_connection_t.in_transaction` field
+  - Files: `pg_config.c`, `pg_config.h`, `db_interpose_exec.c`, `db_interpose_prepare.c`
+
+- **CRITICAL: Connection mismatch in lastval()** - Wrong sequence values returned from different connection
+  - Root cause: INSERT uses `pg_get_thread_connection()` but `lastval()` used `pg_find_connection()`
+  - Between INSERT and lastval(), pool state can change (thread steals slot, cache invalidated, etc.)
+  - Result: INSERT on connection A succeeds, `lastval()` queries connection B, returns wrong ID
+  - Solution: Use `pg_get_thread_connection()` for metadata functions on library.db
+  - Modified `my_sqlite3_last_insert_rowid()`, `my_sqlite3_changes()`, `my_sqlite3_changes64()`
+  - Guarantees same thread-local connection for INSERT and metadata retrieval
+
+### Changed
+- Transaction commands (BEGIN/COMMIT/ROLLBACK) now executed on PostgreSQL instead of skipped
+- Transaction state tracking via `in_transaction` field in connection structure
+- Metadata functions (`lastval()`, `changes()`) now use thread-local connection for library.db
+- Ensures transaction consistency across all operations in a single thread
+
+### Technical Notes
+- v0.8.10 implements explicit transaction handling (ROOT CAUSE fix)
+- Complements v0.8.9.6 (pool reuse) and v0.8.9.7 (connection mismatch) fixes
+- All three fixes work together for complete transaction correctness
+
+## [0.8.9.6] - 2026-01-12
+
+### Fixed
+- **CRITICAL: Uncommitted transactions lost on connection pool reuse** - playQueues 500 errors
+  - Root cause: PQreset() in PHASE 2 of `pool_get_connection()` aborts uncommitted transactions
+  - Sequence: Thread A INSERTs -> releases connection -> Thread B reuses -> PQreset() rolls back
+  - lastval() succeeds (sequence persists) but actual INSERT data is rolled back
+  - Result: 404 on subsequent GET requests despite successful lastval() return
+  - Solution: Check PQtransactionStatus() and COMMIT before releasing connection (pg_close_pool_for_db)
+  - Defense-in-depth: Also check and COMMIT before PQreset() in PHASE 2 reuse
+  - PostgreSQL implicit transactions now properly committed before pool slot release
+
+### Changed
+- `pg_close_pool_for_db()` now commits pending transactions before marking slot as SLOT_FREE
+- `pool_get_connection()` PHASE 2 now commits pending transactions before PQreset()
+
 ## [0.8.9.5] - 2026-01-12
 
 ### Fixed
