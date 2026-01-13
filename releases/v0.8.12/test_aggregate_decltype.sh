@@ -16,7 +16,7 @@ echo "========================================"
 echo ""
 
 # Configuration
-PLEX_TOKEN="${PLEX_TOKEN:-***REMOVED***}"
+PLEX_TOKEN="${PLEX_TOKEN:-YOUR_PLEX_TOKEN_HERE}"
 PLEX_URL="http://127.0.0.1:32400"
 LOG_FILE="/tmp/plex_redirect_pg.log"
 PLEX_LOG="$HOME/Library/Logs/Plex Media Server/Plex Media Server.log"

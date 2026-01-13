@@ -2,85 +2,25 @@
 Plex PostgreSQL Shim - Release v0.8.12
 ========================================
 
-Release Date: January 13, 2026
-Platform: macOS ARM64 (Apple Silicon)
-Build Type: Production
-
 CRITICAL BUG FIX: std::bad_cast in TV Shows Endpoint
-----------------------------------------------------
 
-This release fixes a critical bug where the TV shows endpoint
-returned HTTP 500 errors with std::bad_cast exceptions.
-
-What's Fixed:
-✅ TV shows endpoint now returns HTTP 200 (was 500)
-✅ MetadataCounterCache rebuilds successfully
+✅ TV shows endpoint: HTTP 200 (was 500)
 ✅ No more std::bad_cast exceptions
 ✅ 1755+ TV shows load correctly
-✅ Movies continue working (backward compatible)
 
-Files Included:
----------------
-- db_interpose_pg.dylib          : Pre-compiled shim (macOS ARM64)
-- INSTALL.md                     : Installation instructions
-- RELEASE_NOTES.md               : Detailed release notes
-- CHANGELOG.md                   : Full changelog
-- test_aggregate_decltype.sh     : Integration test
-- SHA256SUMS                     : File checksums
-- VERSION                        : Version number
-
-SHA256 Checksums:
------------------
-4d2e87b029c2a2d8987191fe8630ed482f6a25f1b17cc364b3d01ec0402c9e49  db_interpose_pg.dylib
-b2f854032762319b550a039767acf747f78d8bfcdf6a6ecb84937bd29047d653  plex-postgresql-v0.8.12-macos-arm64.tar.gz
-
-Verify checksums:
-  shasum -a 256 -c SHA256SUMS
-
-Quick Installation:
--------------------
-1. Extract: tar -xzf plex-postgresql-v0.8.12-macos-arm64.tar.gz
-2. Stop Plex: pkill "Plex Media Server"
-3. Install dylib to your location
-4. Start Plex with: DYLD_INSERT_LIBRARIES="./db_interpose_pg.dylib" \
-                    "/Applications/Plex Media Server.app/Contents/MacOS/Plex Media Server.original" &
-5. Test: curl http://localhost:32400/library/sections/6/all?type=2
+Quick Install:
+1. Extract tarball
+2. Stop Plex
+3. Copy db_interpose_pg.dylib to installation dir
+4. Export PLEX_TOKEN="your_token"
+5. Start Plex with DYLD_INSERT_LIBRARIES
+6. Run test_aggregate_decltype.sh
 
 See INSTALL.md for detailed instructions.
 
 Requirements:
--------------
-- macOS ARM64 (Apple Silicon M1/M2/M3)
+- macOS ARM64 (M1/M2/M3)
 - Plex Media Server 1.42.x
 - PostgreSQL 15.x
-- Plex database already migrated to PostgreSQL
 
-Support:
---------
-- GitHub: https://github.com/yourusername/plex-postgresql
-- Issues: https://github.com/yourusername/plex-postgresql/issues
-- Documentation: See RELEASE_NOTES.md and INSTALL.md
-
-Technical Details:
-------------------
-This release implements a workaround for a bug in Plex's embedded
-SOCI library where BIGINT aggregate functions (count, sum, max, min, avg)
-cause std::bad_cast exceptions when accessed via row.get<int64_t>().
-
-The fix forces aggregate functions to declare as TEXT type instead
-of BIGINT, bypassing SOCI's strict integer type checking.
-
-Related: SOCI Issue #1190 (identical bug, fixed in SOCI 4.1.0)
-
-Build Info:
------------
-Built on: macOS ARM64
-Compiler: clang (Apple Silicon)
-PostgreSQL: 15.15
-Optimization: -O2
-
-License:
---------
-See LICENSE file in the repository.
-
-========================================
+Support: https://github.com/cgnl/plex-postgresql
