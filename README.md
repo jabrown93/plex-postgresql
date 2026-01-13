@@ -438,17 +438,41 @@ python3 scripts/benchmark_compare.py
 
 The stack protection test validates all protection layers by simulating low-stack conditions without running Plex.
 
+## Known Issues
+
+### ✅ FIXED in v0.8.12: TV Shows HTTP 500 Error
+
+**Status:** Fixed in v0.8.12  
+**Issue:** TV shows endpoint returned HTTP 500 with `std::bad_cast` exceptions  
+**Root Cause:** Plex's SOCI library bug with BIGINT aggregate functions (count, sum, etc.)  
+**Solution:** Aggregate functions now declare as TEXT type to bypass SOCI's strict integer type checking  
+**Action:** Update to v0.8.12 or later
+
+See [What's New](#whats-new-in-v0812) for details.
+
 ## Known Limitations
 
-### sqlite3_column_decltype Not Intercepted
+### PostgreSQL Type Mapping
 
-The shim currently does **not** intercept `sqlite3_column_decltype()` calls. This function is used by SOCI ORM (which Plex uses internally) to determine C++ type bindings for query results.
+The shim translates SQLite types to PostgreSQL equivalents:
 
-**Why not?** The decltype interception has edge cases that return incorrect types. SOCI ORM uses decltype to determine C++ type bindings - when the returned type doesn't match the actual data, SOCI throws `std::bad_cast` exceptions causing 500 errors. By NOT intercepting decltype, the original SQLite function returns NULL, which makes SOCI fall back to `sqlite3_column_type()` (which we handle correctly).
+- **INTEGER** → INT4 (32-bit) or INT8 (64-bit based on context)
+- **BIGINT** → INT8 (64-bit) - ✅ Fixed in v0.8.12
+- **Aggregate functions** (count, sum, max, min, avg) → Declared as TEXT with 64-bit values
+  - **Why TEXT?** Workaround for SOCI Issue #1190 - forces SOCI to use text-to-integer conversion which works correctly
+  - **Impact:** None - values are still 64-bit integers, just declared differently to SOCI
 
-**Impact:** Some edge cases with complex type conversions may not work perfectly. In practice, Plex operates normally without this interception - the shim handles type mapping through `sqlite3_column_type()` instead.
+### SOCI Type System Workaround
 
-**Status:** Experimental support exists in the `develop` branch but is disabled in production (`main` branch) until all edge cases are resolved.
+**Background:** Plex uses SOCI ORM which has a bug (SOCI Issue #1190) parsing BIGINT values from aggregate functions.
+
+**Our solution (v0.8.12+):**
+- Aggregate functions declare as TEXT type to SOCI
+- Data is still 64-bit integers from PostgreSQL
+- SOCI's text-to-int conversion works correctly
+- Bypasses SOCI's buggy native BIGINT handling
+
+**Impact:** Transparent to Plex - all functionality works correctly.
 
 ## Troubleshooting
 
