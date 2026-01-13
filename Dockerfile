@@ -92,9 +92,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && locale-gen en_US.UTF-8
 
 # Set locale environment variables for boost::locale compatibility
+# CHARSET is required for boost::locale to work correctly (prevents invalid_charset_error)
 ENV LANG=en_US.UTF-8
 ENV LC_ALL=en_US.UTF-8
 ENV LANGUAGE=en_US.UTF-8
+ENV CHARSET=UTF-8
 
 RUN mkdir -p /usr/local/lib/plex-postgresql
 
