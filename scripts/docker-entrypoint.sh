@@ -150,6 +150,25 @@ init_sqlite_schema() {
     init_single_sqlite_db "$db_dir/com.plexapp.plugins.library.blobs.db" "$schema_file"
 }
 
+# Pre-create required Plex directories
+# Prevents boost::filesystem errors when Plex scans for plugins and metadata
+init_plex_directories() {
+    local plex_dir="/config/Library/Application Support/Plex Media Server"
+    
+    echo "Ensuring required Plex directories exist..."
+    
+    # Create standard Plex directories
+    mkdir -p "$plex_dir/Plug-ins"
+    mkdir -p "$plex_dir/Metadata"
+    mkdir -p "$plex_dir/Cache"
+    mkdir -p "$plex_dir/Logs"
+    
+    # Set ownership to abc:abc (PUID:PGID from environment)
+    chown -R abc:abc "$plex_dir" 2>/dev/null || true
+    
+    echo "Plex directories initialized"
+}
+
 # Setup locale for boost::locale compatibility
 setup_locale() {
     echo "Setting up locale for Plex/boost::locale..."
@@ -212,6 +231,7 @@ if [ -n "$PLEX_PG_HOST" ]; then
         check_and_migrate || true
     fi
 
+    init_plex_directories
     init_sqlite_schema
     setup_locale
     setup_plex_shim
