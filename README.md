@@ -7,9 +7,22 @@
 
 A shim library that intercepts Plex's SQLite calls and redirects them to PostgreSQL. Zero Plex modifications required.
 
+## 🎉 Latest Release: v0.8.12
+
+**Critical bug fix:** TV shows endpoint returning HTTP 500 with `std::bad_cast` exceptions.
+
+- ✅ **Fixed:** TV shows now load correctly (was HTTP 500)
+- ✅ **Fixed:** MetadataCounterCache rebuild works
+- ✅ **New:** Interactive installer with auto-backup
+- ✅ **New:** Start/stop/uninstall scripts included
+
+[📥 Download v0.8.12](https://github.com/cgnl/plex-postgresql/releases/tag/v0.8.12) (macOS ARM64, 100KB)
+
+## Platform Support
+
 | Platform | Status |
 |----------|--------|
-| macOS | ✅ Production tested |
+| macOS ARM64 | ✅ Production tested - Pre-compiled binary available |
 | Linux (Docker) | ✅ Production tested (65K+ items, full library queries) |
 | Linux (Native) | ⚠️ Untested |
 
@@ -79,6 +92,37 @@ make benchmark
 
 For rclone/Real-Debrid setups with Kometa/PMM, **SQLite becomes unusable** during library scans. PostgreSQL handles it without issues.
 
+## What's New in v0.8.12
+
+### Critical Bug Fix: TV Shows HTTP 500 Error
+
+**Problem:** TV shows endpoint crashed with `std::bad_cast` exception during MetadataCounterCache rebuild.
+
+**Root Cause:** Plex's embedded SOCI library has a bug parsing BIGINT values from aggregate functions (count, sum, max, min, avg) when accessed via `row.get<int64_t>()`.
+
+**Solution:** Workaround forces aggregate functions to declare as TEXT type instead of BIGINT, bypassing SOCI's strict integer type checking.
+
+**Impact:**
+- ✅ TV shows endpoint: HTTP 200 (was 500)
+- ✅ 1755+ TV shows load successfully
+- ✅ MetadataCounterCache rebuilds without crashes
+- ✅ No more `std::bad_cast` exceptions
+
+**Technical Details:** Related to [SOCI Issue #1190](https://github.com/SOCI/soci/issues/1190) (identical bug, fixed in SOCI 4.1.0). See [CHANGELOG.md](CHANGELOG.md) for full details.
+
+### Easy Installation
+
+New interactive installer script:
+```bash
+./install.sh  # One command, handles everything
+```
+
+Features:
+- Automatic Plex binary backup
+- Creates start/stop scripts
+- Generates uninstall script
+- Architecture and OS validation
+
 ## Quick Start (Docker)
 
 The easiest way to run Plex with PostgreSQL:
@@ -121,11 +165,44 @@ volumes:
 
 ## Quick Start (macOS)
 
-### 1. Setup PostgreSQL
+### Option 1: Pre-compiled Binary (Recommended)
+
+**Latest Release:** [v0.8.12](https://github.com/cgnl/plex-postgresql/releases/tag/v0.8.12) - Fixes std::bad_cast in TV shows endpoint
 
 ```bash
-brew install postgresql@17
-brew services start postgresql@17
+# Download and extract
+curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.8.12/plex-postgresql-v0.8.12-macos-arm64.tar.gz -o plex-pg.tar.gz
+tar -xzf plex-pg.tar.gz
+cd v0.8.12
+
+# Run installer (interactive)
+./install.sh
+```
+
+The installer will:
+- ✅ Backup your Plex binary automatically
+- ✅ Install to `~/.plex-postgresql`
+- ✅ Create start/stop scripts
+- ✅ Generate uninstall script
+
+Then start Plex:
+```bash
+~/.plex-postgresql/start_plex.sh
+```
+
+**Requirements:**
+- macOS ARM64 (Apple Silicon M1/M2/M3)
+- Plex Media Server 1.42.x
+- PostgreSQL 15.x or later
+- Plex database already migrated to PostgreSQL
+
+### Option 2: Build from Source
+
+#### 1. Setup PostgreSQL
+
+```bash
+brew install postgresql@15
+brew services start postgresql@15
 
 createuser plex
 createdb -O plex plex
@@ -133,7 +210,7 @@ psql -d plex -c "ALTER USER plex PASSWORD 'plex';"
 psql -U plex -d plex -c "CREATE SCHEMA plex;"
 ```
 
-### 2. Build & Install
+#### 2. Build & Install
 
 ```bash
 git clone https://github.com/cgnl/plex-postgresql.git
@@ -145,7 +222,7 @@ pkill -x "Plex Media Server" 2>/dev/null
 ./scripts/install_wrappers.sh
 ```
 
-### 3. Start Plex
+#### 3. Start Plex
 
 ```bash
 open "/Applications/Plex Media Server.app"
