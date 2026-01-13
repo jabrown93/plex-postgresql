@@ -128,7 +128,9 @@ Features:
 
 ## Quick Start (Docker)
 
-The easiest way to run Plex with PostgreSQL:
+The easiest way to run Plex with PostgreSQL - works on **all platforms** (Linux, macOS, Windows).
+
+### Fresh Installation (No Existing Plex Database)
 
 ```bash
 git clone https://github.com/cgnl/plex-postgresql.git
@@ -141,29 +143,81 @@ docker-compose up -d
 docker-compose logs -f plex
 ```
 
-Plex will be available at http://localhost:8080
+**Setup:**
+1. Open http://localhost:8080/web
+2. Claim your server with Plex account
+3. Add libraries via web interface
+4. Done! Your libraries are stored in PostgreSQL
 
-PostgreSQL is automatically configured with schema initialization.
+**What happens:**
+- ✅ PostgreSQL schema auto-created (empty)
+- ✅ v0.8.12 fix active (no bad_cast exceptions)
+- ✅ Multi-arch support (x86_64 + ARM64)
+- ✅ All directories pre-created (Plug-ins, Metadata, Cache)
+- ✅ No crashes, stable operation
+
+### Migration from Existing SQLite Database
+
+To migrate your existing Plex library to PostgreSQL:
+
+1. **Edit `docker-compose.yml`**, uncomment and update the source database path:
+   ```yaml
+   volumes:
+     - plex_config:/config
+     - postgres_socket:/var/run/postgresql
+     # Uncomment and edit this line:
+     - "/path/to/your/Plex Media Server/Plug-in Support/Databases:/source-db:ro"
+   ```
+
+2. **Platform-specific paths:**
+   - **macOS**: `"${HOME}/Library/Application Support/Plex Media Server/Plug-in Support/Databases:/source-db:ro"`
+   - **Linux**: `"/var/lib/plexmediaserver/Library/Application Support/Plex Media Server/Plug-in Support/Databases:/source-db:ro"`
+   - **Windows**: `"C:/Users/YourName/AppData/Local/Plex Media Server/Plug-in Support/Databases:/source-db:ro"`
+
+3. **Start containers:**
+   ```bash
+   docker-compose up -d
+   ```
+
+4. **Monitor migration:**
+   ```bash
+   docker-compose logs -f plex | grep -E "migration|Migration"
+   ```
+
+**Migration performs:**
+- ✅ Automatic detection of SQLite database
+- ✅ Full data migration (all tables, metadata, posters, etc.)
+- ✅ Tested: 34 tables, 89K+ items migrated successfully
+- ✅ Original SQLite database remains unchanged (read-only mount)
+- ✅ Automatic sequence updates
+- ✅ Progress reporting per table
 
 ### Configuration
 
-Edit `docker-compose.yml` to customize:
-
+Default PostgreSQL connection (via Unix socket for best performance):
 ```yaml
 environment:
-  - PLEX_PG_HOST=postgres
-  - PLEX_PG_PORT=5432
+  - PLEX_PG_HOST=/var/run/postgresql  # Unix socket (7% faster)
   - PLEX_PG_DATABASE=plex
   - PLEX_PG_USER=plex
   - PLEX_PG_PASSWORD=plex
   - PLEX_PG_SCHEMA=plex
   - PLEX_PG_POOL_SIZE=50
+  - PLEX_PG_LOG_LEVEL=DEBUG  # 0=ERROR, 1=INFO, 2=DEBUG
 ```
 
-Mount your media:
+To use TCP instead of Unix socket:
+```yaml
+environment:
+  - PLEX_PG_HOST=postgres  # TCP connection
+  - PLEX_PG_PORT=5432
+```
+
+Mount your media libraries:
 ```yaml
 volumes:
-  - /path/to/media:/media:ro
+  - /path/to/movies:/movies:ro
+  - /path/to/tv:/tv:ro
 ```
 
 ## Quick Start (macOS)
@@ -240,43 +294,81 @@ pkill -x "Plex Media Server" 2>/dev/null
 ./scripts/uninstall_wrappers.sh
 ```
 
-## Quick Start (Linux Native) - Untested
+## Quick Start (Linux Native)
 
-### 1. Setup PostgreSQL
+**Recommended for production Linux installations** - better performance than Docker.
+
+### Option 1: Pre-compiled Binary (Recommended)
+
+**Latest Release:** [v0.8.12](https://github.com/cgnl/plex-postgresql/releases/tag/v0.8.12) - Fixes std::bad_cast in TV shows endpoint
+
+**Available architectures:**
+- ✅ x86_64 (Intel/AMD 64-bit)
+- ✅ ARM64 (aarch64, Raspberry Pi 4/5, ARM servers)
 
 ```bash
-sudo apt install postgresql-15
+# Download and extract
+curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.8.12/plex-postgresql-v0.8.12-linux.tar.gz | tar xz
+cd v0.8.12
+
+# 1. Setup PostgreSQL
+sudo apt install postgresql-15  # or yum install postgresql15-server
 sudo -u postgres createuser plex
 sudo -u postgres createdb -O plex plex
-sudo -u postgres psql -c "ALTER USER plex PASSWORD 'plex';"
-psql -U plex -d plex -c "CREATE SCHEMA plex;"
+sudo -u postgres psql -c "ALTER USER plex PASSWORD 'yourpassword';"
+
+# 2. Stop Plex and install (auto-migrates database)
+sudo systemctl stop plexmediaserver
+sudo ./scripts/install_wrappers_linux.sh
+
+# 3. Configure connection
+sudo nano /etc/default/plexmediaserver
+# Add these lines:
+# PLEX_PG_HOST=localhost
+# PLEX_PG_DATABASE=plex
+# PLEX_PG_USER=plex
+# PLEX_PG_PASSWORD=yourpassword
+
+# 4. Start Plex
+sudo systemctl start plexmediaserver
 ```
 
-### 2. Build & Install
+**What the installer does:**
+- ✅ Automatically migrates SQLite → PostgreSQL
+- ✅ Backs up original Plex binaries
+- ✅ Installs wrapper scripts with LD_PRELOAD
+- ✅ No Plex code modifications required
+- ✅ Easy uninstall: `sudo ./scripts/uninstall_wrappers_linux.sh`
+
+**Requirements:**
+- Linux x86_64 or ARM64
+- Plex Media Server 1.40+ (officially supports up to 1.42.x)
+- PostgreSQL 15.x or later
+- Root access (for wrapper installation)
+
+### Option 2: Build from Source
 
 ```bash
 # Install dependencies
-sudo apt install build-essential libsqlite3-dev libpq-dev
+sudo apt install build-essential libsqlite3-dev libpq-dev postgresql-15
 
+# Setup PostgreSQL
+sudo -u postgres createuser plex
+sudo -u postgres createdb -O plex plex
+sudo -u postgres psql -c "ALTER USER plex PASSWORD 'plex';"
+
+# Build and install
 git clone https://github.com/cgnl/plex-postgresql.git
 cd plex-postgresql
 make linux
 sudo make install
 
-# Stop Plex, install wrappers
+# Install wrappers (auto-migrates database)
 sudo systemctl stop plexmediaserver
 sudo ./scripts/install_wrappers_linux.sh
-```
 
-### 3. Configure & Start
-
-```bash
-# Add to /etc/default/plexmediaserver:
-# PLEX_PG_HOST=localhost
-# PLEX_PG_DATABASE=plex
-# PLEX_PG_USER=plex
-# PLEX_PG_PASSWORD=plex
-
+# Configure and start
+sudo nano /etc/default/plexmediaserver  # Add PLEX_PG_* variables
 sudo systemctl start plexmediaserver
 ```
 
