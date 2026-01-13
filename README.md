@@ -16,15 +16,18 @@ A shim library that intercepts Plex's SQLite calls and redirects them to Postgre
 - ✅ **New:** Interactive installer with auto-backup
 - ✅ **New:** Start/stop/uninstall scripts included
 
-[📥 Download v0.8.12](https://github.com/cgnl/plex-postgresql/releases/tag/v0.8.12) (macOS ARM64, 100KB)
+[📥 Download v0.8.12](https://github.com/cgnl/plex-postgresql/releases/tag/v0.8.12) | [📖 Installation Guide](INSTALL.md)
+
+**Available for:** macOS ARM64 (100KB) • Linux x86_64 + ARM64 (375KB) • Docker (multi-arch)
 
 ## Platform Support
 
-| Platform | Status |
-|----------|--------|
-| macOS ARM64 | ✅ Production tested - Pre-compiled binary available |
-| Linux (Docker) | ✅ Production tested (65K+ items, full library queries) |
-| Linux (Native) | ⚠️ Untested |
+| Platform | Architecture | Status |
+|----------|-------------|---------|
+| macOS | ARM64 (M1/M2/M3) | ✅ Production tested |
+| Linux | x86_64 | ✅ Pre-compiled binary |
+| Linux | ARM64 | ✅ Pre-compiled binary |
+| Docker | x86_64 + ARM64 | ✅ Multi-arch support |
 
 ## Why PostgreSQL?
 
