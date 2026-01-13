@@ -760,9 +760,9 @@ int my_sqlite3_column_type(sqlite3_stmt *pStmt, int idx) {
                 break;
         }
         
-        LOG_ERROR("COLUMN_TYPE: idx=%d col='%s' row=%d OID=%u is_null=%d -> %s (decltype='%s')",
-                idx, col_name ? col_name : "?", row, (unsigned)oid, is_null, 
-                sqlite_type_name(result), col_decltype ? col_decltype : "NULL");
+    LOG_DEBUG("COLUMN_TYPE: idx=%d col='%s' row=%d OID=%u is_null=%d -> %s (decltype='%s')",
+            idx, col_name ? col_name : "?", row, (unsigned)oid, is_null, 
+            sqlite_type_name(result), col_decltype ? col_decltype : "NULL");
         pthread_mutex_unlock(&pg_stmt->mutex);
         return result;
     }
@@ -1196,7 +1196,7 @@ const unsigned char* my_sqlite3_column_text(sqlite3_stmt *pStmt, int idx) {
             
             // CRITICAL WARNING: column_text called for INTEGER column - this suggests SOCI type mismatch
             if (oid == 23 || oid == 20 || oid == 21) {  // int4, int8, int2
-                LOG_ERROR("COLUMN_TEXT_INTEGER: col='%s' idx=%d row=%d oid=%u val='%.50s' - INTEGER column accessed as TEXT!",
+                LOG_DEBUG("COLUMN_TEXT_INTEGER: col='%s' idx=%d row=%d oid=%u val='%.50s' - INTEGER column accessed as TEXT!",
                           col_name ? col_name : "?", idx, row, oid, source_value);
                 
                 // TARGETED FIX: Only reformat aggregate function results (count, sum, max, min, avg)
@@ -1476,7 +1476,7 @@ const char* my_sqlite3_column_decltype(sqlite3_stmt *pStmt, int idx) {
     LOG_DEBUG("DECLTYPE_ENTRY: stmt=%p idx=%d", (void*)pStmt, idx);
     pg_stmt_t *pg_stmt = pg_find_any_stmt(pStmt);
     // CRITICAL DEBUG: Log all decltype calls
-    LOG_ERROR("DECLTYPE_CALLED: stmt=%p idx=%d pg_stmt=%p is_pg=%d",
+    LOG_DEBUG("DECLTYPE_CALLED: stmt=%p idx=%d pg_stmt=%p is_pg=%d",
              (void*)pStmt, idx, (void*)pg_stmt, pg_stmt ? pg_stmt->is_pg : -1);
     // Handle all PostgreSQL statements
     if (pg_stmt && pg_stmt->is_pg) {
@@ -1546,7 +1546,7 @@ const char* my_sqlite3_column_decltype(sqlite3_stmt *pStmt, int idx) {
                          cached_type, col_name, idx);
             }
             // CRITICAL DEBUG: Log cached decltype returns too
-            LOG_ERROR("DECLTYPE_CACHED: idx=%d col='%s' -> '%s' sql=%.300s",
+            LOG_DEBUG("DECLTYPE_CACHED: idx=%d col='%s' -> '%s' sql=%.300s",
                      idx, col_name ? col_name : "?", cached_type,
                      pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
             pthread_mutex_unlock(&pg_stmt->mutex);
@@ -1568,7 +1568,7 @@ const char* my_sqlite3_column_decltype(sqlite3_stmt *pStmt, int idx) {
                 strcmp(col_name, "avg") == 0 ||
                 strstr(col_name, "count(") != NULL ||
                 strstr(col_name, "COUNT(") != NULL) {
-                LOG_ERROR("DECLTYPE_AGGREGATE: col='%s' OID=20 (BIGINT) -> returning TEXT to avoid SOCI bad_cast bug", col_name);
+                LOG_DEBUG("DECLTYPE_AGGREGATE: col='%s' OID=20 (BIGINT) -> returning TEXT to avoid SOCI bad_cast bug", col_name);
                 pthread_mutex_unlock(&pg_stmt->mutex);
                 return "TEXT";  // WORKAROUND: Force TEXT to avoid SOCI integer parsing bug
             }
@@ -1581,7 +1581,7 @@ const char* my_sqlite3_column_decltype(sqlite3_stmt *pStmt, int idx) {
 
         // LOG INT8 vs INT4 detection (for debugging type issues)
         if (strcmp(decltype, "BIGINT") == 0 || strcmp(decltype, "INTEGER") == 0) {
-            LOG_ERROR("DECLTYPE_INT: col='%s' idx=%d oid=%u -> '%s' sql=%.100s",
+            LOG_DEBUG("DECLTYPE_INT: col='%s' idx=%d oid=%u -> '%s' sql=%.100s",
                       col_name ? col_name : "?", idx, (unsigned)oid, decltype,
                       pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
         }
@@ -1593,7 +1593,7 @@ const char* my_sqlite3_column_decltype(sqlite3_stmt *pStmt, int idx) {
                      idx, col_name ? col_name : "?", (unsigned)oid, decltype);
         }
         
-        LOG_ERROR("DECLTYPE_CACHED: idx=%d col='%s' -> '%s' sql=%.100s",
+        LOG_DEBUG("DECLTYPE_CACHED: idx=%d col='%s' -> '%s' sql=%.100s",
                  idx, col_name ? col_name : "?", decltype,
                  pg_stmt->pg_sql ? pg_stmt->pg_sql : "?");
         
