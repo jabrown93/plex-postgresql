@@ -235,6 +235,11 @@ if [ -n "$PLEX_PG_HOST" ]; then
     init_sqlite_schema
     setup_locale
     setup_plex_shim
+    
+    # Final permission fix - ensure Plex can write to its directories
+    # This must be done after all directories are created
+    echo "Fixing final permissions..."
+    chown -R abc:abc "/config/Library/Application Support/Plex Media Server" 2>/dev/null || true
 else
     echo "PLEX_PG_HOST not set, skipping PostgreSQL initialization"
 fi
