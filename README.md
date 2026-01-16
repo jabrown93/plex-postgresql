@@ -7,18 +7,43 @@
 
 A shim library that intercepts Plex's SQLite calls and redirects them to PostgreSQL. Zero Plex modifications required.
 
-## 🎉 Latest Release: v0.8.12
+## 🎉 Latest Release: v0.9.2
 
-**Critical bug fix:** TV shows endpoint returning HTTP 500 with `std::bad_cast` exceptions.
+**Critical bug fix:** Timeline 500 errors during playback statistics recording.
 
-- ✅ **Fixed:** TV shows now load correctly (was HTTP 500)
-- ✅ **Fixed:** MetadataCounterCache rebuild works
-- ✅ **New:** Interactive installer with auto-backup
-- ✅ **New:** Start/stop/uninstall scripts included
+- ✅ **Fixed:** Timeline endpoint HTTP 500 errors (playback tracking)
+- ✅ **Fixed:** `last_insert_rowid()` with mismatched database handles
+- ✅ **Fixed:** Empty statistics_media row prevention maintained
+- ✅ **New:** Comprehensive Linux installation documentation
 
-[📥 Download v0.8.12](https://github.com/cgnl/plex-postgresql/releases/tag/v0.8.12) | [📖 Installation Guide](INSTALL.md)
+[📥 Download v0.9.2](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.2) | [📋 Full Release Notes](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.2)
 
-**Available for:** macOS ARM64 (100KB) • Linux x86_64 + ARM64 (375KB) • Docker (multi-arch)
+**Available for:** macOS ARM64 (224KB) • Linux x86_64 (264KB) • Linux ARM64 (257KB) • Docker (multi-arch)
+
+### Quick Install
+
+**macOS:**
+```bash
+curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.2/db_interpose_pg.dylib \
+  -o /usr/local/lib/db_interpose_pg.dylib
+# Then configure DYLD_INSERT_LIBRARIES in Plex launchd plist
+```
+
+**Linux (x86_64):**
+```bash
+sudo curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.2/db_interpose_pg_linux_x86_64.so \
+  -o /usr/local/lib/db_interpose_pg.so
+# Then configure LD_PRELOAD in systemd service
+```
+
+**Docker:**
+```bash
+git clone https://github.com/cgnl/plex-postgresql.git
+cd plex-postgresql
+docker-compose up -d
+```
+
+See detailed installation instructions below for each platform.
 
 ## Platform Support
 
@@ -95,23 +120,24 @@ make benchmark
 
 For rclone/Real-Debrid setups with Kometa/PMM, **SQLite becomes unusable** during library scans. PostgreSQL handles it without issues.
 
-## What's New in v0.8.12
+## What's New in v0.9.2
 
-### Critical Bug Fix: TV Shows HTTP 500 Error
+### Critical Bug Fix: Timeline 500 Error
 
-**Problem:** TV shows endpoint crashed with `std::bad_cast` exception during MetadataCounterCache rebuild.
+**Problem:** `/:/timeline` endpoint returned HTTP 500 errors during playback statistics recording with `Got exception from request handler: std::exception`.
 
-**Root Cause:** Plex's embedded SOCI library has a bug parsing BIGINT values from aggregate functions (count, sum, max, min, avg) when accessed via `row.get<int64_t>()`.
+**Root Cause:** Plex calls `sqlite3_last_insert_rowid()` with a different database handle than the one used for INSERT operations. The shim's connection lookup returned NULL, causing `last_insert_rowid()` to return 0, which triggered exceptions in Plex.
 
-**Solution:** Workaround forces aggregate functions to declare as TEXT type instead of BIGINT, bypassing SOCI's strict integer type checking.
+**Solution:** Enhanced `last_insert_rowid()` with fallback connection lookup using `pg_find_any_library_connection()` when exact handle match fails. Additionally, sequence advancement now occurs BEFORE skipping empty statistics_media INSERTs to ensure valid rowid values.
 
 **Impact:**
-- ✅ TV shows endpoint: HTTP 200 (was 500)
-- ✅ 1755+ TV shows load successfully
-- ✅ MetadataCounterCache rebuilds without crashes
-- ✅ No more `std::bad_cast` exceptions
+- ✅ Timeline requests return HTTP 200 (was 500)
+- ✅ Playback statistics correctly recorded
+- ✅ Empty statistics_media rows still prevented (no 310M row accumulation)
+- ✅ Multiple consecutive timeline requests succeed
+- ✅ No SQLITE_MISUSE errors
 
-**Technical Details:** Related to [SOCI Issue #1190](https://github.com/SOCI/soci/issues/1190) (identical bug, fixed in SOCI 4.1.0). See [CHANGELOG.md](CHANGELOG.md) for full details.
+**Technical Details:** See [v0.9.2 Release Notes](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.2) for complete details and installation instructions.
 
 ### Easy Installation
 
@@ -151,7 +177,7 @@ docker-compose logs -f plex
 
 **What happens:**
 - ✅ PostgreSQL schema auto-created (empty)
-- ✅ v0.8.12 fix active (no bad_cast exceptions)
+- ✅ v0.9.2 fixes active (timeline errors fixed)
 - ✅ Multi-arch support (x86_64 + ARM64)
 - ✅ All directories pre-created (Plug-ins, Metadata, Cache)
 - ✅ No crashes, stable operation
@@ -224,33 +250,49 @@ volumes:
 
 ### Option 1: Pre-compiled Binary (Recommended)
 
-**Latest Release:** [v0.8.12](https://github.com/cgnl/plex-postgresql/releases/tag/v0.8.12) - Fixes std::bad_cast in TV shows endpoint
+**Latest Release:** [v0.9.2](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.2) - Fixes timeline 500 errors
 
 ```bash
-# Download and extract
-curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.8.12/plex-postgresql-v0.8.12-macos-arm64.tar.gz -o plex-pg.tar.gz
-tar -xzf plex-pg.tar.gz
-cd v0.8.12
+# Download the shim
+curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.2/db_interpose_pg.dylib \
+  -o /usr/local/lib/db_interpose_pg.dylib
 
-# Run installer (interactive)
-./install.sh
+# Configure Plex environment
+sudo nano /Library/LaunchDaemons/com.plexapp.plexmediaserver.plist
 ```
 
-The installer will:
-- ✅ Backup your Plex binary automatically
-- ✅ Install to `~/.plex-postgresql`
-- ✅ Create start/stop scripts
-- ✅ Generate uninstall script
+Add environment variables to the plist file:
+```xml
+<key>EnvironmentVariables</key>
+<dict>
+  <key>DYLD_INSERT_LIBRARIES</key>
+  <string>/usr/local/lib/db_interpose_pg.dylib</string>
+  <key>PLEX_PG_HOST</key>
+  <string>localhost</string>
+  <key>PLEX_PG_PORT</key>
+  <string>5432</string>
+  <key>PLEX_PG_DATABASE</key>
+  <string>plex</string>
+  <key>PLEX_PG_USER</key>
+  <string>plex</string>
+  <key>PLEX_PG_PASSWORD</key>
+  <string>your_password</string>
+  <key>PLEX_PG_SCHEMA</key>
+  <string>plex</string>
+</dict>
+```
 
-Then start Plex:
+Restart Plex:
 ```bash
-~/.plex-postgresql/start_plex.sh
+sudo launchctl unload /Library/LaunchDaemons/com.plexapp.plexmediaserver.plist
+sudo launchctl load /Library/LaunchDaemons/com.plexapp.plexmediaserver.plist
 ```
 
 **Requirements:**
-- macOS ARM64 (Apple Silicon M1/M2/M3)
-- Plex Media Server 1.42.x
-- PostgreSQL 15.x or later
+- macOS 11+ (Big Sur or later)
+- Apple Silicon (M1/M2/M3/M4)
+- Plex Media Server 1.40+
+- PostgreSQL 12+ server running
 - Plex database already migrated to PostgreSQL
 
 ### Option 2: Build from Source
@@ -300,51 +342,93 @@ pkill -x "Plex Media Server" 2>/dev/null
 
 ### Option 1: Pre-compiled Binary (Recommended)
 
-**Latest Release:** [v0.8.12](https://github.com/cgnl/plex-postgresql/releases/tag/v0.8.12) - Fixes std::bad_cast in TV shows endpoint
+**Latest Release:** [v0.9.2](https://github.com/cgnl/plex-postgresql/releases/tag/v0.9.2) - Fixes timeline 500 errors
 
 **Available architectures:**
 - ✅ x86_64 (Intel/AMD 64-bit)
 - ✅ ARM64 (aarch64, Raspberry Pi 4/5, ARM servers)
 
-```bash
-# Download and extract
-curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.8.12/plex-postgresql-v0.8.12-linux.tar.gz | tar xz
-cd v0.8.12
+#### Step 1: Setup PostgreSQL
 
-# 1. Setup PostgreSQL
-sudo apt install postgresql-15  # or yum install postgresql15-server
+```bash
+# Install PostgreSQL
+sudo apt install postgresql-15  # Ubuntu/Debian
+# or: sudo yum install postgresql15-server  # RHEL/CentOS
+
+# Create database and user
 sudo -u postgres createuser plex
 sudo -u postgres createdb -O plex plex
 sudo -u postgres psql -c "ALTER USER plex PASSWORD 'yourpassword';"
-
-# 2. Stop Plex and install (auto-migrates database)
-sudo systemctl stop plexmediaserver
-sudo ./scripts/install_wrappers_linux.sh
-
-# 3. Configure connection
-sudo nano /etc/default/plexmediaserver
-# Add these lines:
-# PLEX_PG_HOST=localhost
-# PLEX_PG_DATABASE=plex
-# PLEX_PG_USER=plex
-# PLEX_PG_PASSWORD=yourpassword
-
-# 4. Start Plex
-sudo systemctl start plexmediaserver
+sudo -u postgres psql -d plex -c "CREATE SCHEMA IF NOT EXISTS plex; ALTER SCHEMA plex OWNER TO plex;"
 ```
 
-**What the installer does:**
-- ✅ Automatically migrates SQLite → PostgreSQL
-- ✅ Backs up original Plex binaries
-- ✅ Installs wrapper scripts with LD_PRELOAD
-- ✅ No Plex code modifications required
-- ✅ Easy uninstall: `sudo ./scripts/uninstall_wrappers_linux.sh`
+#### Step 2: Download and Install Shim
+
+**For x86_64 (Intel/AMD):**
+```bash
+sudo curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.2/db_interpose_pg_linux_x86_64.so \
+  -o /usr/local/lib/db_interpose_pg.so
+sudo chmod 644 /usr/local/lib/db_interpose_pg.so
+```
+
+**For ARM64 (aarch64):**
+```bash
+sudo curl -L https://github.com/cgnl/plex-postgresql/releases/download/v0.9.2/db_interpose_pg_linux_arm64.so \
+  -o /usr/local/lib/db_interpose_pg.so
+sudo chmod 644 /usr/local/lib/db_interpose_pg.so
+```
+
+#### Step 3: Configure Plex systemd Service
+
+```bash
+# Create systemd override directory
+sudo mkdir -p /etc/systemd/system/plexmediaserver.service.d
+
+# Create environment configuration
+sudo nano /etc/systemd/system/plexmediaserver.service.d/postgresql.conf
+```
+
+Add the following content:
+```ini
+[Service]
+Environment="LD_PRELOAD=/usr/local/lib/db_interpose_pg.so"
+Environment="PLEX_PG_HOST=localhost"
+Environment="PLEX_PG_PORT=5432"
+Environment="PLEX_PG_DATABASE=plex"
+Environment="PLEX_PG_USER=plex"
+Environment="PLEX_PG_PASSWORD=yourpassword"
+Environment="PLEX_PG_SCHEMA=plex"
+Environment="PLEX_PG_LOG_LEVEL=INFO"
+```
+
+#### Step 4: Restart Plex
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart plexmediaserver
+```
+
+#### Step 5: Verify Installation
+
+```bash
+# Check Plex logs for PostgreSQL connection
+sudo journalctl -u plexmediaserver -n 100 | grep -i postgres
+
+# Expected output:
+# "PostgreSQL connection established to localhost:5432/plex"
+# "PostgreSQL shim initialized (v0.9.2)"
+
+# Verify shim is loaded
+sudo cat /proc/$(pgrep -f "Plex Media Server")/maps | grep db_interpose_pg
+# Should show: /usr/local/lib/db_interpose_pg.so
+```
 
 **Requirements:**
 - Linux x86_64 or ARM64
-- Plex Media Server 1.40+ (officially supports up to 1.42.x)
-- PostgreSQL 15.x or later
-- Root access (for wrapper installation)
+- Plex Media Server 1.40+
+- PostgreSQL 12+ server running
+- glibc 2.28+ (Ubuntu 18.04+, Debian 10+, RHEL 8+)
+- Root access (for systemd configuration)
 
 ### Option 2: Build from Source
 
@@ -535,15 +619,23 @@ The stack protection test validates all protection layers by simulating low-stac
 
 ## Known Issues
 
+### ✅ FIXED in v0.9.2: Timeline 500 Error
+
+**Status:** Fixed in v0.9.2  
+**Issue:** `/:/timeline` endpoint returned HTTP 500 errors during playback with `std::exception`  
+**Root Cause:** `sqlite3_last_insert_rowid()` called with different database handle, causing NULL connection lookup  
+**Solution:** Fallback connection lookup + sequence advancement before skipping empty INSERTs  
+**Action:** Update to v0.9.2 or later
+
+See [What's New](#whats-new-in-v092) for details.
+
 ### ✅ FIXED in v0.8.12: TV Shows HTTP 500 Error
 
 **Status:** Fixed in v0.8.12  
 **Issue:** TV shows endpoint returned HTTP 500 with `std::bad_cast` exceptions  
 **Root Cause:** Plex's SOCI library bug with BIGINT aggregate functions (count, sum, etc.)  
-**Solution:** Aggregate functions now declare as TEXT type to bypass SOCI's strict integer type checking  
-**Action:** Update to v0.8.12 or later
-
-See [What's New](#whats-new-in-v0812) for details.
+**Solution:** Aggregate functions declare as TEXT type to bypass SOCI's strict integer type checking  
+**Impact:** TV shows now load correctly, MetadataCounterCache rebuilds work
 
 ## Known Limitations
 
