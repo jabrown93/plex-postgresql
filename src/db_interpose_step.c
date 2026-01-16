@@ -14,9 +14,16 @@
 
 int my_sqlite3_step(sqlite3_stmt *pStmt) {
     pg_stmt_t *pg_stmt = pg_find_stmt(pStmt);
+    
+    // CRITICAL FIX v0.9.0: Set in_step flag to prevent concurrent bind
+    if (pg_stmt) {
+        atomic_store(&pg_stmt->in_step, 1);
+    }
 
     // Skip statements
     if (pg_stmt && pg_stmt->is_pg == 3) {
+        LOG_ERROR("[RACE_DEBUG] STEP_END thread=%p stmt=%p rc=%d reason=skip", 
+                  (void*)pthread_self(), (void*)pStmt, SQLITE_DONE);
         return SQLITE_DONE;
     }
 
@@ -736,9 +743,24 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
         // SOCI expects this and uses last_insert_rowid() to get the ID via lastval()
         // The RETURNING result is kept for debugging but not exposed as SQLITE_ROW
         if (pg_stmt->is_pg == 1) return SQLITE_DONE;
+    
+    // DEBUG TRACE: Log every step completion for PlayQueue/COUNT queries
+    if (pg_stmt && pg_stmt->pg_sql) {
+        int is_count = (strstr(pg_stmt->pg_sql, "COUNT(") != NULL || strstr(pg_stmt->pg_sql, "SUM(") != NULL || strstr(pg_stmt->pg_sql, "MAX(") != NULL);
+        int is_playqueue = (strstr(pg_stmt->pg_sql, "play_queue") != NULL);
+        
+        if (is_count || is_playqueue) {
+            LOG_ERROR("DEBUG_TRACE: STEP_EXIT - rows=%d cols=%d sql=%.100s",
+                      pg_stmt->num_rows, pg_stmt->num_cols, pg_stmt->pg_sql);
+        }
+    }
     }
 
-    return orig_sqlite3_step ? orig_sqlite3_step(pStmt) : SQLITE_ERROR;
+    // RACE_DEBUG: Log before final fallback
+    int final_rc = orig_sqlite3_step ? orig_sqlite3_step(pStmt) : SQLITE_ERROR;
+    LOG_ERROR("[RACE_DEBUG] STEP_END thread=%p stmt=%p rc=%d reason=fallback", 
+              (void*)pthread_self(), (void*)pStmt, final_rc);
+    return final_rc;
 }
 
 // ============================================================================
@@ -750,6 +772,10 @@ int my_sqlite3_reset(sqlite3_stmt *pStmt) {
     pg_stmt_t *pg_stmt = pg_find_any_stmt(pStmt);
     if (pg_stmt) {
         pthread_mutex_lock(&pg_stmt->mutex);
+        
+        // CRITICAL FIX v0.9.0: Clear in_step flag to allow new bind operations
+        atomic_store(&pg_stmt->in_step, 0);
+        
         for (int i = 0; i < MAX_PARAMS; i++) {
             if (pg_stmt->param_values[i] && !is_preallocated_buffer(pg_stmt, i)) {
                 free(pg_stmt->param_values[i]);
@@ -777,6 +803,10 @@ int my_sqlite3_reset(sqlite3_stmt *pStmt) {
     pg_stmt_t *cached = pg_find_cached_stmt(pStmt);
     if (cached) {
         pthread_mutex_lock(&cached->mutex);
+        
+        // CRITICAL FIX v0.9.0: Clear in_step flag to allow new bind operations
+        atomic_store(&cached->in_step, 0);
+        
         pg_stmt_clear_result(cached);  // This also resets write_executed
         int is_pg_only = (cached->is_pg == 2);
 

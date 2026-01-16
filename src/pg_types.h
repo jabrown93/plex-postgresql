@@ -166,6 +166,7 @@ typedef struct pg_stmt {
     int write_executed;              // 1 if write has been executed (prevents duplicate execution)
     int read_done;                   // 1 if read has returned SQLITE_DONE (prevents re-execution)
     int metadata_only_result;        // v0.8.9: 1 if result is from pre-step metadata call (needs re-exec on bind)
+    atomic_int in_step;              // v0.9.0: 1 if step operation is in progress (prevents concurrent bind)
     pthread_t executing_thread;      // Thread currently executing this statement (for debug)
     pg_connection_t *result_conn;    // Connection that the current result belongs to
 
