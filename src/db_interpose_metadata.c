@@ -60,12 +60,20 @@ sqlite3_int64 my_sqlite3_last_insert_rowid(sqlite3 *db) {
     in_interpose_call = 1;
 
     pg_connection_t *pg_conn = pg_find_connection(db);
+    
+    // FIX v0.9.2: If we can't find the exact connection, try to find ANY library connection
+    // This happens when Plex uses a different db handle than the one that did the INSERT
+    if (!pg_conn) {
+        pg_conn = pg_find_any_library_connection();
+        LOG_ERROR("last_insert_rowid: CALLED db=%p pg_conn=%p (FALLBACK to any library connection)", 
+                  (void*)db, (void*)pg_conn);
+    } else {
+        LOG_ERROR("last_insert_rowid: CALLED db=%p pg_conn=%p (exact match)", (void*)db, (void*)pg_conn);
+    }
+    
     sqlite3_int64 result = 0;
 
-    LOG_ERROR("last_insert_rowid: CALLED db=%p pg_conn=%p", (void*)db, (void*)pg_conn);
-
-    // Only use PostgreSQL lastval() if we found the EXACT connection for this db
-    // Using a fallback connection would return wrong values from different tables
+    // Use PostgreSQL lastval() if we found a connection
     if (pg_conn && pg_conn->is_pg_active && pg_conn->conn) {
         // CRITICAL FIX: Lock connection mutex to prevent concurrent libpq access
         pthread_mutex_lock(&pg_conn->mutex);

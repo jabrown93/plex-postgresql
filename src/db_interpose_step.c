@@ -620,16 +620,32 @@ int my_sqlite3_step(sqlite3_stmt *pStmt) {
             }
 
             // VALIDATION: Skip statistics_media INSERTs with empty count AND duration
-            // This prevents the 310M empty rows bug
+            // FIX v0.9.2: Fetch sequence value before skipping to make last_insert_rowid() work
             if (pg_stmt->pg_sql && strcasestr(pg_stmt->pg_sql, "statistics_media")) {
                 // Check if count (param 6) and duration (param 7) are both 0 or NULL
                 const char *count_val = (pg_stmt->param_count > 6) ? paramValues[6] : NULL;
                 const char *duration_val = (pg_stmt->param_count > 7) ? paramValues[7] : NULL;
                 int count_empty = !count_val || strcmp(count_val, "0") == 0;
                 int duration_empty = !duration_val || strcmp(duration_val, "0") == 0;
+                
                 if (count_empty && duration_empty) {
                     LOG_INFO("SKIP statistics_media INSERT: count=%s duration=%s (empty)",
                             count_val ? count_val : "NULL", duration_val ? duration_val : "NULL");
+                    
+                    // CRITICAL FIX: Advance the sequence so last_insert_rowid() works
+                    // This prevents Plex from throwing std::exception on timeline requests
+                    if (exec_conn && exec_conn->conn && PQstatus(exec_conn->conn) == CONNECTION_OK) {
+                        pthread_mutex_lock(&exec_conn->mutex);
+                        PGresult *seq_res = PQexec(exec_conn->conn, 
+                            "SELECT nextval('plex.statistics_media_id_seq')");
+                        if (PQresultStatus(seq_res) == PGRES_TUPLES_OK && PQntuples(seq_res) > 0) {
+                            const char *seq_val = PQgetvalue(seq_res, 0, 0);
+                            LOG_INFO("SKIP: Advanced sequence to %s", seq_val);
+                        }
+                        PQclear(seq_res);
+                        pthread_mutex_unlock(&exec_conn->mutex);
+                    }
+                    
                     pg_stmt->write_executed = 1;
                     pthread_mutex_unlock(&pg_stmt->mutex);
                     return SQLITE_DONE;
