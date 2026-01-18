@@ -19,17 +19,17 @@ WORKDIR /build
 # Download and build PostgreSQL with minimal features (just libpq)
 RUN curl -L https://ftp.postgresql.org/pub/source/v15.10/postgresql-15.10.tar.gz | tar xz
 RUN cd postgresql-15.10 && \
-    # Configure WITHOUT OpenSSL to avoid ENGINE symbol conflicts
+ # Configure WITHOUT OpenSSL to avoid ENGINE symbol conflicts. \
     ./configure --prefix=/usr/local/pgsql \
         --without-readline \
         --without-zlib \
         --without-openssl \
         --without-icu && \
-    # Build and install include files first
+    # Build and install include files first \
     cd src/include && make install && \
-    # Build and install libpq
+    # Build and install libpq \
     cd ../interfaces/libpq && make && make install && \
-    # Build pg_config for headers
+    # Build pg_config for headers \
     cd ../../bin/pg_config && make && make install
 
 # Copy source files
@@ -78,7 +78,7 @@ RUN mkdir -p /libs && \
     ls -la /libs/
 
 # Runtime stage
-FROM linuxserver/plex:latest
+FROM linuxserver/plex:1.42.2.10156-f737b826c-ls288
 
 # Install PostgreSQL client for health checks, sqlite3 for schema fixes, gdb for debugging
 # Also install locales - required for boost::locale in Plex
