@@ -1,7 +1,7 @@
 # Dockerfile for plex-postgresql
 # Build with Alpine 3.15 which has musl 1.2.2 - same as Plex's bundled musl!
 
-FROM alpine:3.15 AS builder
+FROM alpine:3.23 AS builder
 
 # Install build dependencies
 RUN apk add --no-cache \
