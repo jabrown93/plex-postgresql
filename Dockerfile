@@ -1,7 +1,7 @@
 # Dockerfile for plex-postgresql
 # Build with Alpine 3.15 which has musl 1.2.2 - same as Plex's bundled musl!
 
-FROM alpine:3.23 AS builder
+FROM alpine:3.15.11 AS builder
 
 # Install build dependencies
 RUN apk add --no-cache \
@@ -11,8 +11,13 @@ RUN apk add --no-cache \
     curl \
     perl
 
-# Verify musl version matches Plex (1.2.2)
-RUN /lib/ld-musl-*.so.1 --version 2>&1 | head -2
+# Verify musl version is 1.2.2 (must match Plex's bundled musl)
+RUN MUSL_VERSION=$(/lib/ld-musl-*.so.1 --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1) && \
+    echo "Detected musl version: $MUSL_VERSION" && \
+    if [ "$MUSL_VERSION" != "1.2.2" ]; then \
+        echo "ERROR: musl version must be 1.2.2 to match Plex, but found $MUSL_VERSION" && \
+        exit 1; \
+    fi
 
 WORKDIR /build
 

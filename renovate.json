@@ -2,5 +2,13 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "local>jabrown93/.github:renovate-config"
+  ],
+  "packageRules": [
+    {
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["alpine"],
+      "allowedVersions": "3.15",
+      "description": "Pin Alpine to 3.15 - required for musl 1.2.2 compatibility with Plex"
+    }
   ]
 }
