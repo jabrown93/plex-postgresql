@@ -2,6 +2,9 @@
 
 [![en](https://img.shields.io/badge/lang-en-red.svg)](README.md)
 [![es](https://img.shields.io/badge/lang-es-yellow.svg)](README.es.md)
+[![Build](https://img.shields.io/github/actions/workflow/status/jabrown93/plex-postgresql/docker-release.yml?label=build)](https://github.com/jabrown93/plex-postgresql/actions/workflows/docker-release.yml)
+[![Issues](https://img.shields.io/github/issues/jabrown93/plex-postgresql)](https://github.com/jabrown93/plex-postgresql/issues)
+[![License](https://img.shields.io/github/license/jabrown93/plex-postgresql)](LICENSE)
 
 **Run Plex Media Server with PostgreSQL instead of SQLite.**
 
